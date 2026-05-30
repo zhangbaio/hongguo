@@ -1,0 +1,37 @@
+# 红果 API 服务 — redroid(安卓容器) + API服务 一键部署
+# 要求: ARM64 Linux 主机(红果只有arm64库) + 宿主机已加载 binder 内核模块。
+# 用法: 在项目根目录放好 base.apk 和 config.json, 然后:
+#   docker compose -f redroid/docker-compose.yml up -d --build
+services:
+  redroid:
+    image: redroid/redroid:12.0.0-latest      # arm64 主机会拉到 arm64 镜像
+    container_name: redroid
+    privileged: true
+    volumes:
+      - ./redroid-data:/data                   # 安卓数据持久化(app登录态/device_id保留)
+    ports:
+      - "5555:5555"                            # adb
+    command:
+      - androidboot.redroid_width=720
+      - androidboot.redroid_height=1280
+      - androidboot.redroid_dpi=320
+      - androidboot.redroid_gpu_mode=guest     # 无显卡服务器用软件渲染
+      - androidboot.use_memfd=true
+    restart: unless-stopped
+
+  hongguo-api:
+    build:
+      context: ..                              # 构建上下文=项目根(需要 base.apk/config.json/代码)
+      dockerfile: redroid/Dockerfile
+    container_name: hongguo-api
+    depends_on:
+      - redroid
+    environment:
+      ADB: adb
+      ADB_DEVICE: redroid:5555                 # 同 compose 网络内按服务名访问
+      FRIDA_HOST: 127.0.0.1:27042              # adb forward 后本地可达
+      SIGN_SERVER: http://127.0.0.1:8001
+      PYTHONUTF8: "1"
+    ports:
+      - "8000:8000"                            # 对外 API
+    restart: unless-stopped

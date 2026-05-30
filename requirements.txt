@@ -1,0 +1,11 @@
+# 运行下载器/服务
+requests
+frida==16.7.19
+fastapi
+uvicorn[standard]
+pillow
+pillow-heif
+# 抓包分析(逆向阶段)
+mitmproxy==11.0.2
+# 部署(SSH)
+paramiko

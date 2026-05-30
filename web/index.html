@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>红果短剧</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:-apple-system,"Microsoft YaHei",sans-serif; background:#141414; color:#eee; }
+  header { background:#1f1f1f; padding:10px 16px; display:flex; gap:10px; align-items:center; position:sticky; top:0; z-index:10; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; color:#ff6b35; }
+  .tabs { display:flex; gap:6px; }
+  .tab { padding:6px 14px; background:#2a2a2a; border-radius:16px; cursor:pointer; font-size:14px; }
+  .tab.on { background:#ff6b35; color:#fff; }
+  input,select,button { background:#2a2a2a; color:#eee; border:1px solid #444; border-radius:6px; padding:7px 10px; font-size:14px; }
+  button { cursor:pointer; }
+  button:hover { background:#ff6b35; }
+  #key { width:120px; }
+  .sub { padding:8px 16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap; background:#191919; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:14px; padding:16px; }
+  .card { background:#1f1f1f; border-radius:8px; overflow:hidden; cursor:pointer; transition:.15s; }
+  .card:hover { transform:translateY(-3px); outline:2px solid #ff6b35; }
+  .card .cover { width:100%; aspect-ratio:3/4; object-fit:cover; background:#333; }
+  .card .info { padding:8px; }
+  .card .t { font-size:14px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card .m { font-size:12px; color:#999; margin-top:3px; }
+  .badge { display:inline-block; background:#ff6b35; color:#fff; font-size:10px; padding:1px 5px; border-radius:3px; margin-left:4px; }
+  #modal { position:fixed; inset:0; background:rgba(0,0,0,.85); display:none; align-items:center; justify-content:center; z-index:20; }
+  #modal .box { background:#1f1f1f; border-radius:10px; width:min(720px,92vw); max-height:88vh; overflow:auto; padding:20px; }
+  .eps { display:flex; flex-wrap:wrap; gap:6px; margin:12px 0; }
+  .ep { width:42px; height:34px; display:flex; align-items:center; justify-content:center; background:#2a2a2a; border-radius:5px; cursor:pointer; font-size:13px; }
+  .ep:hover,.ep.sel { background:#ff6b35; }
+  .row { display:flex; gap:8px; align-items:center; margin:10px 0; flex-wrap:wrap; }
+  #prog { font-size:13px; color:#9c9; white-space:pre-wrap; }
+  .close { float:right; cursor:pointer; color:#888; font-size:22px; }
+  a { color:#6cf; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎬 红果短剧</h1>
+  <div class="tabs">
+    <div class="tab on" data-v="search">搜索</div>
+    <div class="tab" data-v="rank">榜单</div>
+    <div class="tab" data-v="latest">今日上新</div>
+  </div>
+  <span style="flex:1"></span>
+  <input id="key" placeholder="api_key(可空)">
+</header>
+
+<div class="sub" id="sub"></div>
+<div class="grid" id="grid"></div>
+
+<div id="modal"><div class="box" id="box"></div></div>
+
+<script>
+const API = location.origin;
+function key(){ return document.getElementById('key').value.trim(); }
+function q(p){ p = p||{}; if(key()) p.api_key=key(); return '?'+new URLSearchParams(p); }
+async function get(path, p){ const r = await fetch(API+path+q(p)); if(!r.ok) throw new Error((await r.json()).detail||r.status); return r.json(); }
+localStorage.k && (document.getElementById('key').value = localStorage.k);
+document.getElementById('key').onchange = e => localStorage.k = e.target.value;
+
+let view = 'search';
+const sub = document.getElementById('sub'), grid = document.getElementById('grid');
+
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));
+  t.classList.add('on'); view = t.dataset.v; renderSub();
+});
+
+function renderSub(){
+  grid.innerHTML='';
+  if(view==='search'){
+    sub.innerHTML = `<input id="qq" placeholder="输入剧名" style="flex:1;min-width:200px"><button onclick="doSearch()">搜索</button>`;
+    document.getElementById('qq').onkeydown = e => e.key==='Enter' && doSearch();
+  } else if(view==='rank'){
+    sub.innerHTML = `<select id="board"><option value="recommend">推荐榜</option><option value="hot">热播榜</option><option value="new">新剧榜</option></select><button onclick="doRank()">刷新</button>`;
+    doRank();
+  } else {
+    sub.innerHTML = `<select id="genre"><option value="short_play">短剧</option><option value="comic_series">漫剧</option><option value="ai_series">AI短剧</option></select>
+      <label><input type="checkbox" id="today" checked> 仅今日上新</label><button onclick="doLatest()">刷新</button>`;
+    doLatest();
+  }
+}
+async function doSearch(){ const v=document.getElementById('qq').value.trim(); if(!v)return; grid.innerHTML='搜索中...'; try{ cards((await get('/search',{q:v})).results); }catch(e){ grid.innerHTML='错误: '+e.message; } }
+async function doRank(){ grid.innerHTML='加载中...'; try{ cards((await get('/rank',{board:document.getElementById('board').value,limit:30})).items); }catch(e){ grid.innerHTML='错误: '+e.message; } }
+async function doLatest(){ grid.innerHTML='加载中...'; try{ cards((await get('/latest',{genre:document.getElementById('genre').value,only_today:document.getElementById('today').checked,limit:60})).items); }catch(e){ grid.innerHTML='错误: '+e.message; } }
+
+function cards(list){
+  if(!list||!list.length){ grid.innerHTML='无结果'; return; }
+  grid.innerHTML='';
+  list.forEach(it=>{
+    const d=document.createElement('div'); d.className='card';
+    const hot = it.hot || (it.play_cnt? (it.play_cnt/10000|0)+'万播放':'');
+    const cv = it.cover ? '/img?url='+encodeURIComponent(it.cover) : '';
+    d.innerHTML = `<img class="cover" loading="lazy" src="${cv}" onerror="this.style.opacity=.15">
+      <div class="info"><div class="t">${it.title||''}${it.today?'<span class="badge">今日</span>':''}</div>
+      <div class="m">${it.episode_cnt||0}集 ${it.score?'★'+it.score:''} ${hot}</div></div>`;
+    d.onclick = ()=>openSeries(it.series_id, it.title);
+    grid.appendChild(d);
+  });
+}
+
+const modal=document.getElementById('modal'), box=document.getElementById('box');
+modal.onclick = e => { if(e.target===modal) modal.style.display='none'; };
+let curEps=[], curId=null;
+async function openSeries(sid, title){
+  curId=sid; modal.style.display='flex'; box.innerHTML='<span class="close" onclick="modal.style.display=\'none\'">×</span>加载中...';
+  try{
+    const r = await get('/episodes',{series_id:sid});
+    curEps = r.episodes; const m=r.meta;
+    box.innerHTML = `<span class="close" onclick="modal.style.display='none'">×</span>
+      <h2 style="margin:0 0 6px">${m.title}</h2>
+      <div class="m" style="color:#999">${m.status} · ${m.episode_cnt}集 · ${(m.play_cnt/10000|0)}万播放 · ${(m.category||[]).join('/')}</div>
+      <p style="font-size:13px;color:#bbb">${(m.intro||'').slice(0,120)}</p>
+      <div class="row">范围: <input id="rng" placeholder="如 1-10 / all" value="all" style="width:110px">
+        <button onclick="copyLinks()">📋 复制直链(批量)</button>
+        <button onclick="doDownload()" title="存到运行程序的电脑">下载到服务器</button>
+        <label style="font-size:12px"><input type="checkbox" id="epcov"> 含封面</label></div>
+      <div style="font-size:12px;color:#888;margin:-4px 0 6px">复制的直链粘到 IDM/迅雷 等下载器即可直连字节CDN下到本地(不占服务器带宽)。点集号可单集操作。</div>
+      <div id="prog"></div>
+      <div class="eps">${curEps.map(e=>`<div class="ep" onclick="playEp(${e.index})" title="${(e.title||'').slice(0,20)}">${e.index}</div>`).join('')}</div>`;
+  }catch(e){ box.innerHTML='<span class="close" onclick="modal.style.display=\'none\'">×</span>错误: '+e.message; }
+}
+let lastUrl='';
+async function copyText(t){ try{ await navigator.clipboard.writeText(t); return true; }catch(e){ return false; } }
+async function playEp(idx){
+  const p=document.getElementById('prog'); p.textContent='获取第'+idx+'集...';
+  try{
+    const r=await get('/play',{series_id:curId,ep:String(idx)});
+    const u=r.episodes[0]?.url; lastUrl=u||'';
+    const stream=API+'/stream'+q({series_id:curId,ep:String(idx)});
+    p.innerHTML = `第${idx}集: ` + (u?`<a href="${u}" target="_blank">▶️ 在线播放</a> &nbsp; <button onclick="copyOne()">📋 复制直链</button> &nbsp; `:'(无直链) ')
+      + `<a href="${stream}">⬇️ 经服务器下载</a>`;
+  }catch(e){ p.textContent='错误: '+e.message; }
+}
+async function copyOne(){
+  if(!lastUrl) return;
+  const ok=await copyText(lastUrl);
+  document.getElementById('prog').innerHTML += ok?' <span style="color:#9c9">已复制!</span>':' 复制失败';
+}
+async function copyLinks(){
+  const rng=document.getElementById('rng').value.trim()||'all';
+  const p=document.getElementById('prog'); p.textContent='获取直链中...';
+  try{
+    const r=await get('/play',{series_id:curId,ep:rng});
+    const lines=r.episodes.filter(e=>e.url).map(e=>e.url);
+    if(!lines.length){ p.textContent='无可用直链'; return; }
+    const ok=await copyText(lines.join('\n'));
+    p.innerHTML = ok ? `<span style="color:#9c9">已复制 ${lines.length} 条直链</span>，粘到 IDM/迅雷 批量下载(直链约6小时有效)`
+                     : '复制失败,手动全选复制: <textarea style="width:100%;height:90px">'+lines.join('\n')+'</textarea>';
+  }catch(e){ p.textContent='错误: '+e.message; }
+}
+async function doDownload(){
+  const rng=document.getElementById('rng').value.trim()||'all';
+  const epcov=document.getElementById('epcov').checked;
+  const p=document.getElementById('prog'); p.textContent='提交下载任务...';
+  try{
+    const r=await get('/download',{series_id:curId,ep:rng,ep_covers:epcov});
+    const tid=r.task_id;
+    const poll=setInterval(async()=>{
+      const s=await get('/download/status',{task_id:tid});
+      p.textContent=`[${s.state}] ${s.done}/${s.total} 完成, 失败${s.failed}`;
+      if((s.state||'').startsWith('完成')||(s.state||'').startsWith('错误')){ clearInterval(poll); p.textContent+='\n保存到: '+(s.folder||''); }
+    },1500);
+  }catch(e){ p.textContent='错误: '+e.message; }
+}
+renderSub();
+</script>
+</body>
+</html>

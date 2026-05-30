@@ -1,0 +1,52 @@
+# ===== 凭证 / 密钥（绝不提交）=====
+config.json
+deploy/frp_token.txt
+deploy/frpc.toml
+deploy/id_hongguo
+deploy/id_hongguo.pub
+deploy/*.log
+*.pem
+*.key
+*_token.txt
+certs/
+**/*-wg.conf
+**/wireguard.conf
+**/c8750f0d.0
+
+# ===== 版权二进制（字节 APK / native 库 / 第三方工具）=====
+*.apk
+base.apk
+unidbg/base.apk
+unidbg/libs/
+**/frida-server*
+*.xz
+*.so
+*.dll
+*.dat
+deploy/dist/
+
+# ===== 抓包数据 / 下载产物（含 token / 个人数据 / 大文件）=====
+capture/out/
+capture/*.flow
+capture/*.log
+capture/urls*.log
+downloads/
+*.flow
+*.jsonl
+*.mp4
+*.heic
+
+# ===== Python / 编辑器 / 缓存 =====
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.idea/
+.vscode/
+.claude/
+*.tmp
+
+# 抓包样本/调试数据(非代码)
+capture/*.json
+capture/*.txt
