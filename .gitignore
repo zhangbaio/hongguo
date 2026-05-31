@@ -55,3 +55,4 @@ venv/
 # 抓包样本/调试数据(非代码)
 capture/*.json
 capture/*.txt
+deploy/*.tar.gz
