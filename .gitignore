@@ -1,5 +1,8 @@
 # ===== 凭证 / 密钥（绝不提交）=====
 config.json
+apikeys.json
+apikeys.json.tmp
+.env.ps1
 deploy/frp_token.txt
 deploy/frpc.toml
 deploy/id_hongguo

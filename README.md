@@ -76,6 +76,13 @@ python hongguo.py download 7638207474180312089 1-10 --ep-covers  # 同时下每�
 - **详情(episodes / info.json)**: 上述 + 演员表(演员/角色/头像/简介)、完结状态、
   上线时间、追剧数、分类标签，以及每集的(标题/时长/封面/评论数/点赞数)
 
+## 访问控制(API 密钥)
+服务端(server.py)**强制鉴权**: 所有数据接口必须带有效 `api_key`(请求头 `X-API-Key` 或 `?api_key=`)，否则 401。
+- 密钥存于 `apikeys.json`(不进仓库)，在管理页 **`/admin`** 一键生成/吊销/删除(需 `ADMIN_TOKEN`)。
+- `ADMIN_TOKEN` 等放 `.env.ps1`(不进仓库，模板 `.env.ps1.example`)，`start_all.ps1` 自动加载。
+- 客户端(如 weixin 工具的"本地链路密钥"、网页 `/ui` 的 api_key 框)填生成的密钥即可。
+- `/`、`/ui`、`/img` 免鉴权(页面/封面)；`/admin`、`/stats` 需 `ADMIN_TOKEN`。
+
 ## 关键文件
 
 | 文件 | 作用 |

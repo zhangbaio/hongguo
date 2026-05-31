@@ -5,6 +5,14 @@ $root = "D:\code\hongguo"
 Set-Location $root
 $env:PYTHONUTF8 = "1"
 $env:SIGN_SERVER = "http://127.0.0.1:8001"
+# 密钥/口令从 .env.ps1 读取(该文件在 .gitignore 中, 不进仓库)。模板见 .env.ps1.example。
+#   ADMIN_TOKEN: 进入 /admin 密钥管理页的口令
+#   API_KEYS:    仅首次迁移旧密钥到 apikeys.json 用(之后在 /admin 管理)
+if (Test-Path "$root\.env.ps1") { . "$root\.env.ps1" }
+if (-not $env:ADMIN_TOKEN) {
+  $env:ADMIN_TOKEN = "CHANGE_ME"
+  Write-Host "⚠ 未配置 ADMIN_TOKEN, 请复制 .env.ps1.example 为 .env.ps1 并填写" -ForegroundColor Yellow
+}
 
 function Running($match) {
   return [bool](Get-CimInstance Win32_Process -Filter "name='python.exe'" | Where-Object { $_.CommandLine -like $match })

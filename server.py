@@ -33,24 +33,41 @@ except Exception:
 _img_cache = {}
 _IMG_HOSTS = ("fqnovelpic.com", "byteimg.com", "qznovelvod.com", "douyinpic.com", "pstatp.com")
 
-# ---- 鉴权 + 限流(可选) ----
-# API_KEYS 逗号分隔; 为空则开放访问。RATE_PER_MIN 每key每分钟请求上限。
-API_KEYS = set(k.strip() for k in (os.environ.get("API_KEYS") or "").split(",") if k.strip())
+# ---- 鉴权(强制) + 限流 + 密钥管理 ----
+# 数据接口强制要求有效密钥(来自 apikeys.json, 经 /admin 管理); 客户端不带有效密钥=401。
+# ADMIN_TOKEN: 进入 /admin 管理页/接口的口令(与普通密钥分离)。
+from apikeys import KeyStore
+_keys = KeyStore()
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+if not ADMIN_TOKEN:
+    import secrets as _sec
+    ADMIN_TOKEN = _sec.token_hex(8)
+    print(f"[server] 未设 ADMIN_TOKEN, 临时生成: {ADMIN_TOKEN} (建议在 start_all.ps1 固定)")
 RATE_PER_MIN = int(os.environ.get("RATE_PER_MIN", "120"))
 _rl = {}
 _rl_lock = threading.Lock()
 
+# 免鉴权路径: 首页/网页/封面图/文档/管理页(管理页自己用 ADMIN_TOKEN 校验)
+_EXEMPT = ("/", "/ui", "/img", "/docs", "/openapi.json", "/redoc", "/favicon.ico")
+_ADMIN_PREFIX = "/admin"
 
-_EXEMPT = ("/", "/ui", "/img", "/stats", "/docs", "/openapi.json", "/redoc", "/favicon.ico")
+
+def _check_admin(request: Request) -> bool:
+    tok = request.headers.get("x-admin-token") or request.query_params.get("admin_token") or ""
+    return bool(tok) and tok == ADMIN_TOKEN
 
 
 @app.middleware("http")
 async def auth_mw(request: Request, call_next):
-    if request.url.path not in _EXEMPT:
-        key = request.headers.get("x-api-key") or request.query_params.get("api_key") or "anon"
-        if API_KEYS and key not in API_KEYS:
+    path = request.url.path
+    if path == "/stats" or path.startswith(_ADMIN_PREFIX):
+        # 管理/统计: 由各自处理器用 ADMIN_TOKEN 校验
+        pass
+    elif path not in _EXEMPT:
+        key = request.headers.get("x-api-key") or request.query_params.get("api_key") or ""
+        if not _keys.is_valid(key):            # 强制: 必须有效密钥
             _stats["auth_fail"] += 1
-            return JSONResponse({"detail": "无效或缺少 api_key"}, status_code=401)
+            return JSONResponse({"detail": "缺少或无效的 api_key(请在客户端配置本地链路密钥)"}, status_code=401)
         now = time.time()
         with _rl_lock:
             bucket = _rl.setdefault(key, [])
@@ -92,7 +109,9 @@ def index():
 
 
 @app.get("/stats")
-def stats():
+def stats(request: Request):
+    if not _check_admin(request):
+        raise HTTPException(401, "需要 admin_token")
     import safeguards as SG
     up = int(time.time() - _stats["start"])
     # 签名后端健康
@@ -113,6 +132,46 @@ def stats():
 def ui():
     from fastapi.responses import FileResponse
     return FileResponse(os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "index.html"))
+
+
+# ---------------- 密钥管理(需 ADMIN_TOKEN) ----------------
+def _mask(k: str) -> str:
+    return (k[:6] + "****" + k[-4:]) if len(k) > 12 else "****"
+
+
+@app.get("/admin")
+def admin_page():
+    from fastapi.responses import FileResponse
+    return FileResponse(os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "admin.html"))
+
+
+@app.get("/admin/keys")
+def admin_list_keys(request: Request):
+    if not _check_admin(request):
+        raise HTTPException(401, "admin_token 无效")
+    return {"keys": _keys.list(), "enabled_count": _keys.count_enabled()}
+
+
+@app.post("/admin/keys")
+def admin_gen_key(request: Request, note: str = ""):
+    if not _check_admin(request):
+        raise HTTPException(401, "admin_token 无效")
+    key = _keys.generate(note)
+    return {"ok": True, "key": key, "note": note}
+
+
+@app.post("/admin/keys/revoke")
+def admin_revoke_key(request: Request, key: str, enable: bool = False):
+    if not _check_admin(request):
+        raise HTTPException(401, "admin_token 无效")
+    return {"ok": _keys.revoke(key, enabled=enable)}
+
+
+@app.delete("/admin/keys")
+def admin_delete_key(request: Request, key: str):
+    if not _check_admin(request):
+        raise HTTPException(401, "admin_token 无效")
+    return {"ok": _keys.delete(key)}
 
 
 @app.get("/img")
