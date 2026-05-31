@@ -1,5 +1,7 @@
-﻿# 一键启动本地全栈: frida环境 + 签名服务 + API服务 + 公网隧道
+﻿# 一键启动本地签名栈: frida环境 + 签名服务 + 签名隧道(供云端 short-vedio-manage 签名)
 # 前提: MuMu 开着且红果已装
+# 注: 旧的独立版 API(server.py:8000)+数据隧道(39001)+域名 hongguo.momotools.top 已下线,
+#     功能并入 short-vedio-manage(weixinshortdrama.momotools.top)。如需本地调试可手动跑 server.py。
 $ErrorActionPreference = "Continue"
 $root = "D:\code\hongguo"
 Set-Location $root
@@ -27,25 +29,12 @@ if (Running "*sign_server.py*") { Write-Host "   已在运行" -ForegroundColor 
   Start-Sleep 8; Write-Host "   已启动" -ForegroundColor Green
 }
 
-Write-Host "3) API 服务 server :8000" -ForegroundColor Cyan
-if (Running "* server.py*") { Write-Host "   已在运行" -ForegroundColor Green } else {
-  Start-Process python -ArgumentList "server.py" -WindowStyle Hidden -RedirectStandardOutput "capture\server.log" -RedirectStandardError "capture\server_err.log"
-  Start-Sleep 5; Write-Host "   已启动" -ForegroundColor Green
-}
-
-Write-Host "4) 数据隧道 -> 云 39001 (本地 server:8000)" -ForegroundColor Cyan
-if (Running "*tunnel.py 39001*") { Write-Host "   已在运行" -ForegroundColor Green } else {
-  Start-Process python -ArgumentList "deploy\tunnel.py 39001 8000" -WindowStyle Hidden -RedirectStandardOutput "deploy\tunnel.log" -RedirectStandardError "deploy\tunnel_err.log"
-  Start-Sleep 6; Write-Host "   已启动" -ForegroundColor Green
-}
-
-Write-Host "5) 签名隧道 -> 云 39002 (本地 sign_server:8001, 供云端 short-vedio-manage 签名)" -ForegroundColor Cyan
+Write-Host "3) 签名隧道 -> 云 39002 (本地 sign_server:8001, 供云端 short-vedio-manage 签名)" -ForegroundColor Cyan
 if (Running "*tunnel.py 39002*") { Write-Host "   已在运行" -ForegroundColor Green } else {
   Start-Process python -ArgumentList "deploy\tunnel.py 39002 8001" -WindowStyle Hidden -RedirectStandardOutput "deploy\tunnel8001.log" -RedirectStandardError "deploy\tunnel8001_err.log"
   Start-Sleep 6; Write-Host "   已启动" -ForegroundColor Green
 }
 
-Write-Host "`n全栈就绪:" -ForegroundColor Yellow
-Write-Host "  本地: http://127.0.0.1:8000/ui"
-Write-Host "  公网(hongguo): https://hongguo.momotools.top/ui  (数据隧道 39001)"
-Write-Host "  云端签名: weixinshortdrama.momotools.top 经 39002 -> 本地 sign_server"
+Write-Host "`n签名栈就绪:" -ForegroundColor Yellow
+Write-Host "  本地签名服务: http://127.0.0.1:8001"
+Write-Host "  云端签名: weixinshortdrama.momotools.top 经隧道 39002 -> 本地 sign_server"
