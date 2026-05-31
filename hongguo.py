@@ -187,53 +187,75 @@ def api(method, path, body=None, extra_query=None, max_retries=3):
     raise last if last else RuntimeError("api 失败")
 
 
-def search(query):
-    ck = SG.cache_key("search", query)
+def _parse_search_cell(cell):
+    """从综合tab的一个cell解析短剧条目; 非短剧(无集数)或无id返回 None。"""
+    sid = cell.get("book_id") or cell.get("search_result_id")
+    if not sid:
+        return None
+    vd = cell.get("video_detail") or {}
+    # video_data 可能是数组或对象
+    vdata = cell.get("video_data")
+    if isinstance(vdata, list) and vdata:
+        vdata = vdata[0]
+    elif not isinstance(vdata, dict):
+        vdata = {}
+    inner = vdata.get("video_detail") or {}  # video_data[0].video_detail
+    ep = vd.get("episode_cnt") or vdata.get("episode_cnt") or inner.get("episode_cnt") or 0
+    if not ep:
+        return None  # 只要短剧(有集数的)
+    hl = cell.get("search_high_light", {}).get("title", {}).get("text")
+    title = re.sub("<[^>]+>", "", hl or vd.get("series_title") or vdata.get("title") or inner.get("series_title") or "")
+    return {
+        "series_id": sid,
+        "title": title,
+        "episode_cnt": ep,
+        "score": vdata.get("score") or inner.get("score") or "",
+        "play_cnt": vdata.get("play_cnt") or inner.get("series_play_cnt") or 0,
+        "hot": vdata.get("rec_text") or "",
+        "copyright": vdata.get("copyright") or "",
+        "cover": vdata.get("cover") or inner.get("series_cover") or "",
+        "intro": (inner.get("series_intro") or vd.get("series_intro") or "")[:60],
+    }
+
+
+def search(query, max_items=40):
+    """搜索短剧。原生接口按综合tab分页(next_offset+passback+search_id),
+    这里循环翻页累计短剧结果, 直到 has_more=False 或达 max_items / 翻页上限。
+    """
+    ck = SG.cache_key("search", query, max_items)
     cached = SG.cache_get(ck)
     if cached is not None:
         return cached
-    j = api("GET", "/reading/bookapi/search/tab/v",
-            extra_query={"query": query, "tab_name": "feed", "search_source": "1",
-                         "offset": "0", "count": "0", "use_correct": "true"})
-    results = []
-    for tab in j.get("search_tabs", []):
-        for cell in tab.get("data", []):
-            sid = cell.get("book_id") or cell.get("search_result_id")
-            if not sid:
+    results, seen = [], set()
+    offset, passback, search_id = 0, "", ""
+    for _ in range(12):  # 安全上限: 最多翻12页
+        q = {"query": query, "tab_name": "feed", "search_source": "1",
+             "offset": str(offset), "count": "0", "use_correct": "true"}
+        if passback:
+            q["passback"] = passback
+        if search_id:
+            q["search_id"] = search_id
+        j = api("GET", "/reading/bookapi/search/tab/v", extra_query=q)
+        tabs = j.get("search_tabs") or []
+        if not tabs:
+            break
+        tab = tabs[0]  # 综合tab
+        data = tab.get("data") or []
+        for cell in data:
+            item = _parse_search_cell(cell)
+            if not item or item["series_id"] in seen:
                 continue
-            vd = cell.get("video_detail") or {}
-            # video_data 可能是数组或对象
-            vdata = cell.get("video_data")
-            if isinstance(vdata, list) and vdata:
-                vdata = vdata[0]
-            elif not isinstance(vdata, dict):
-                vdata = {}
-            inner = vdata.get("video_detail") or {}  # video_data[0].video_detail
-            ep = vd.get("episode_cnt") or vdata.get("episode_cnt") or inner.get("episode_cnt") or 0
-            if not ep:
-                continue  # 只要短剧(有集数的)
-            hl = cell.get("search_high_light", {}).get("title", {}).get("text")
-            title = re.sub("<[^>]+>", "", hl or vd.get("series_title") or vdata.get("title") or inner.get("series_title") or "")
-            results.append({
-                "series_id": sid,
-                "title": title,
-                "episode_cnt": ep,
-                "score": vdata.get("score") or inner.get("score") or "",
-                "play_cnt": vdata.get("play_cnt") or inner.get("series_play_cnt") or 0,
-                "hot": vdata.get("rec_text") or "",
-                "copyright": vdata.get("copyright") or "",
-                "cover": vdata.get("cover") or inner.get("series_cover") or "",
-                "intro": (inner.get("series_intro") or vd.get("series_intro") or "")[:60],
-            })
-        break  # 只看综合tab
-    # 去重
-    seen, uniq = set(), []
-    for r in results:
-        if r["series_id"] in seen:
-            continue
-        seen.add(r["series_id"]); uniq.append(r)
-    SG.cache_set(ck, uniq, ttl=600)  # 搜索结果缓存10分钟
-    return uniq
+            seen.add(item["series_id"])
+            results.append(item)
+        nxt = tab.get("next_offset")
+        offset = nxt if nxt is not None else offset
+        passback = tab.get("passback") or passback
+        search_id = tab.get("search_id") or search_id
+        if not tab.get("has_more") or not data or len(results) >= max_items:
+            break
+    results = results[:max_items]
+    SG.cache_set(ck, results, ttl=600)  # 搜索结果缓存10分钟
+    return results
 
 
 def get_episodes(series_id):
