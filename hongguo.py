@@ -419,7 +419,7 @@ GENRES = {
 GENRE_NAMES = {"short_play": "短剧", "comic_series": "漫剧", "ai_series": "AI短剧"}
 
 
-def latest(genre="short_play", only_today=True, max_items=120):
+def latest(genre="short_play", only_today=True, max_items=120, stop_ids=None):
     """最新上架。
     - 短剧(short_play): 官方有'今日上新'标签。only_today=True 精确返回今日上新(扫描多页,
       整页无今日才停,处理交错); False 返回最新上架全部。
@@ -430,14 +430,15 @@ def latest(genre="short_play", only_today=True, max_items=120):
     if genre not in GENRES:
         raise ValueError(f"genre必须是 {list(GENRES)}")
     ck = SG.cache_key("latest", genre, only_today, max_items)
-    cached = SG.cache_get(ck)
-    if cached is not None:
-        return cached
+    if not stop_ids:  # 监控增量模式(传 stop_ids)不读缓存, 且结果为部分新增不写缓存
+        cached = SG.cache_get(ck)
+        if cached is not None:
+            return cached
     scene, g = GENRES[genre]
     tag_today = (genre == "short_play")             # 仅短剧有'今日上新'标签
     online_time = [] if tag_today else ["days_7"]   # 漫剧/AI 用官方最细7天筛选
     want_today = tag_today and only_today
-    out, shown, offset, pages = [], [], 0, 0
+    out, shown, offset, pages, done = [], [], 0, 0, False
     while len(out) < max_items and pages < 20:
         body = {"filter_ids": ",".join(shown), "req_scene": scene, "offset": offset,
                 "need_selector_panel": False, "limit": 18,
@@ -452,6 +453,9 @@ def latest(genre="short_play", only_today=True, max_items=120):
         page_today = 0
         for it in items:
             sid = str(it.get("series_id"))
+            if stop_ids and sid in stop_ids:
+                done = True  # 命中上次已监控的剧: 列表按上线时间倒序, 后面均为更早的已存数据
+                break
             shown.append(sid)
             subs = [s.get("content") for s in (it.get("sub_title_list") or [])]
             is_today = "今日上新" in subs
@@ -469,12 +473,15 @@ def latest(genre="short_play", only_today=True, max_items=120):
             if len(out) >= max_items:
                 break
         pages += 1
+        if done:   # 增量模式: 命中已监控剧, 停止翻页(省下后续签名请求)
+            break
         if want_today and page_today == 0:   # 短剧今日: 整页无今日 => 已过今日簇,停
             break
         if not j.get("data", {}).get("has_more", True):
             break
         offset += len(items)
-    SG.cache_set(ck, out, ttl=1800)  # 缓存30分钟
+    if not stop_ids:
+        SG.cache_set(ck, out, ttl=1800)  # 缓存30分钟(增量模式不写)
     return out
 
 
