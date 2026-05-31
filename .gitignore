@@ -8,6 +8,8 @@ deploy/frpc.toml
 deploy/id_hongguo
 deploy/id_hongguo.pub
 deploy/*.log
+deploy/*.out
+deploy/*.err
 *.pem
 *.key
 *_token.txt

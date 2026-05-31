@@ -14,7 +14,10 @@
 import sys, os, json, time, hashlib, re, subprocess, threading
 import urllib3
 import requests
-import frida
+try:
+    import frida  # 仅本地进程内签名(CLI模式)需要; 设了 SIGN_SERVER 走HTTP时可无
+except Exception:
+    frida = None
 import safeguards as SG
 from safeguards import RiskControlError, AuthExpiredError
 import downloader as DL

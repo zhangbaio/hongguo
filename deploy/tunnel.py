@@ -9,8 +9,11 @@ HOST = os.environ.get("SSH_HOST", "<SERVER_IP>"); USER = os.environ.get("SSH_USE
 PWD = os.environ.get("SSH_PWD")
 HERE = os.path.dirname(os.path.abspath(__file__))
 KEY = os.path.join(HERE, "id_hongguo")
-REMOTE_PORT = int(os.environ.get("REMOTE_PORT", "39001"))
-LOCAL_HOST, LOCAL_PORT = "127.0.0.1", int(os.environ.get("LOCAL_PORT", "8000"))
+# 端口优先级: 命令行参数 > 环境变量 > 默认(39001/8000)。
+# 命令行用法: python tunnel.py [REMOTE_PORT] [LOCAL_PORT]  (便于多实例在进程列表中区分)
+REMOTE_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("REMOTE_PORT", "39001"))
+LOCAL_PORT = int(sys.argv[2]) if len(sys.argv) > 2 else int(os.environ.get("LOCAL_PORT", "8000"))
+LOCAL_HOST = "127.0.0.1"
 
 
 def handler(chan):
@@ -45,17 +48,24 @@ def serve():
     else:
         kw["password"] = PWD
     cli.connect(HOST, username=USER, **kw)
-    tr = cli.get_transport()
-    tr.set_keepalive(30)
-    tr.request_port_forward("0.0.0.0", REMOTE_PORT)
-    print(f"[tunnel] 已建立: {HOST}:{REMOTE_PORT} -> 本地:{LOCAL_PORT}  公网 http://{HOST}:{REMOTE_PORT}/ui")
-    while True:
-        chan = tr.accept(1000)
-        if chan is None:
-            if not tr.is_active():
-                raise IOError("transport 断开")
-            continue
-        threading.Thread(target=handler, args=(chan,), daemon=True).start()
+    try:
+        tr = cli.get_transport()
+        tr.set_keepalive(30)
+        tr.request_port_forward("0.0.0.0", REMOTE_PORT)
+        print(f"[tunnel] 已建立: {HOST}:{REMOTE_PORT} -> 本地:{LOCAL_PORT}  公网 http://{HOST}:{REMOTE_PORT}/ui")
+        while True:
+            chan = tr.accept(1000)
+            if chan is None:
+                if not tr.is_active():
+                    raise IOError("transport 断开")
+                continue
+            threading.Thread(target=handler, args=(chan,), daemon=True).start()
+    finally:
+        # 关闭连接, 让 sshd 立刻释放远端转发端口(避免重连时 request_port_forward 撞"端口占用")
+        try:
+            cli.close()
+        except Exception:
+            pass
 
 
 def main():
