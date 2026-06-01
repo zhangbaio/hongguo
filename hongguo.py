@@ -479,6 +479,7 @@ def latest(genre="short_play", only_today=True, max_items=120, stop_ids=None):
                         "episode_cnt": it.get("episode_cnt", 0), "score": it.get("score", ""),
                         "play_cnt": it.get("play_cnt", 0), "cover": it.get("cover", ""),
                         "category": " / ".join(cats), "today": is_today,
+                        "copyright": it.get("copyright", ""),  # 作者/出品方(或"短剧版权<ID>")
                         "premiere": (it.get("tag_info") or {}).get("text", ""),
                         "intro": (it.get("video_desc") or "")[:50]})
             if len(out) >= max_items:
