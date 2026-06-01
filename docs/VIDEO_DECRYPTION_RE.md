@@ -239,6 +239,52 @@ MC.queueInputBuffer.implementation=function(idx,off,size,pts,flags){
 **全面堵死**；能落地的提速只有**并行化已验证的 MediaCodec 抓取**。原生 aeskeyfind 是唯一残留的离线可能，
 但属多日不确定的独立逆向项目。
 
+---
+
+## 9. 重要进展：加密是**标准 MPEG-CENC AES-CTR**(问题降级为"取16字节内容密钥")
+
+进一步 dump 完整 video_model 后发现关键字段(这改变了难度判断)：
+
+### `encrypt_info` 全貌
+```json
+"encrypt_info": {
+  "encrypt": true,
+  "kid": "6a1978c1f8818b00477f5c0e0002ebeb",          // 16字节 CENC Key ID
+  "spade_a": "oLwu8WK3KPBWix3bZKc03nuWA9h+ojTsZaQs9Va9B8Z6jDKPjw==", // base64→37字节,疑似"包装的内容密钥"
+  "encryption_method": "cenc-aes-ctr"                  // ★标准 MPEG-CENC AES-CTR(非私有!)
+}
+```
+- **`cenc-aes-ctr` 是业界标准**(DASH/Widevine 同款)：**拿到 16 字节内容密钥后，用标准工具
+  (Bento4 `mp4decrypt` / ffmpeg `-decryption_key` / pycryptodome) 即可离线全速解密**。
+- 注意：mp4 的 stsd 里是 `hvc1/hvcC`(明文 codec 配置)、**没有标准 CENC 的 `encv/sinf/senc/tenc/pssh` 盒子**
+  → 字节没用 CENC 的盒子结构承载 IV/KID，而是放在 video_model 的 `encrypt_info` 里。所以 **IV 的来源待定**
+  (可能固定 0、或 per-sample 由样本序号/偏移派生、或在 spade_a 里)——解密时需要确定 IV 规则。
+- `spade_a` 37字节 hex: `a0bc2ef162b728f0568b1ddb64a734de7b9603d87ea234ec65a42cf556bd07c67a8c328f8f`
+  (16字节内容密钥多半在其中, 被某固定/设备密钥包装)。
+
+### `fallback_api`(TTVideo fplay 标准接口)
+`https://vas-lf-x.snssdk.com/video/fplay/1/<token>/<video_id>?...&stream_type=encrypt&codec_type=4&...`
+- 参数化明显，但 **`stream_type` 被 auth 签名覆盖**(`auth_query`=base64("stream_type,force_fids"))：
+  改 `stream_type=normal/空` → `error check params`(签名不匹配)。codec_type 可改但仍 h265/编码URL。
+  → **无法靠改参拿未加密**(auth 锁死)。
+
+### 这意味着剩余唯一难点 = **拿到该 vid 的 16 字节内容密钥**
+第三方下载器正是解决了这一步。可行子路(都需要本机暂缺的工具)：
+1. **逆 `spade_a` 解包**：RE `libEncryptor`/`libdragon_crypt`/`libavmdl` 里 spade_a(37B)→16B 密钥的算法
+   (字节 VOD 的固定 SDK 密钥, 社区有先例)。需反汇编器(IDA/Ghidra)。
+2. **原生 aeskeyfind**：播放时 16字节密钥的 AES 轮密钥驻留内存；用 **C 版 aeskeyfind**(arm64)直扫
+   `/proc/<pid>/mem`(C 速度可啃 5.7GB)→候选密钥→用 **已知明文验证**(已能拿 MediaCodec 明文+密文,
+   对 AES-CTR: 验证 `AES-ECB(key, counter0)==cipher0^plain0`)。需 NDK 交叉编译(本机未装)。
+3. **DRM/license key API**：若密钥经服务端下发, 找该接口(本项目 capture 仅含搜索/下载期, 无播放期调用)。
+
+### 验证就绪
+一旦拿到 16B 密钥 + 确定 IV 规则：用已下载的密文 mdat + `encryption_method=cenc-aes-ctr` 直接离线解，
+全速、可大规模并行。已具备**已知明文**(MediaCodec 抓的真实画面)做密钥/IV 的判定与验证。
+
+### 结论(更新)
+不是"私有黑箱加密"——是**标准 CENC AES-CTR**，目标已收敛为"取 16 字节内容密钥"。差的是本机工具
+(反汇编器 / NDK 编译 aeskeyfind)。配齐工具后这是**有限、明确**的攻关点，而非无底洞。
+
 ### 操作安全须知(接力必看)
 - **不要在跑签名的 frida agent 里做重型同步操作**(会阻塞 JS 线程→签名挂)；必须 `setTimeout` 分块让出，
   或用独立手段(原生工具/离线 dump)。踩坑恢复法：`pkill frida-server` 重启, sign_server 看门狗自动重连。
