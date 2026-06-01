@@ -3,7 +3,15 @@
 > 状态：**视频解密已攻破（思路 D：MediaCodec 明文捕获法，已端到端验证出可播画面）**，
 > 但该法**实时(1x, ~1集/分钟)**。提速探索见「§8」：所有"快过实时/离线破解"路线在当前环境均被堵死
 > （AES + OLLVM 无符号 + 无 S-box + 模拟器 5.7GB 内存 + 播放时钟限速），**能落地的提速只有并行化 MediaCodec 抓取**。
-> 详见文末「§7 突破」「§8 吞吐探索」。下方 §1~§6 为攻破前的探查记录，保留作背景。
+> 详见文末「§7 突破」「§8 吞吐探索」「§9 标准CENC定性」「§10 离线提密钥可行性修正」。下方 §1~§6 为攻破前的探查记录，保留作背景。
+>
+> **§10 关键修正(2026-06-01)**：①§8 "5.7GB 内存扫不完" 判断有误——进程 **RssAnon 仅 ~684MB**（驻留），
+> 5.7GB 是虚拟映射，aeskeyfind 实际只需扫驻留堆，**离线提密钥可行性大幅提升**；②video_model（含
+> spade_a/kid/main_url）**可在内存中快速 Memory.scan 命中**，且 CDN 密文可直链下载 → 已具备"对齐的密文+
+> 元数据"；③`check_info` 的 `c:`/`e:` 是 **AVMDL 下载完整性 CRC**（头部+首1KB），**不是加密范围图**，
+> 实测确认仍是**全样本 AES-CTR**（逐视频密钥）。
+> ⚠ **风险**：本机 MuMu+frida 签名栈是线上生产签名后端，提密钥的内存操作须用 root shell 读
+> `/proc/mem`（独立进程，不碰 frida）以免冻死签名，且建议在低峰授权时段进行。
 >
 > 最后更新：2026-06-01
 
@@ -288,3 +296,53 @@ MC.queueInputBuffer.implementation=function(idx,off,size,pts,flags){
 ### 操作安全须知(接力必看)
 - **不要在跑签名的 frida agent 里做重型同步操作**(会阻塞 JS 线程→签名挂)；必须 `setTimeout` 分块让出，
   或用独立手段(原生工具/离线 dump)。踩坑恢复法：`pkill frida-server` 重启, sign_server 看门狗自动重连。
+
+---
+
+## 10. 离线提密钥可行性修正 + 对齐密文已就绪(2026-06-01)
+
+这一轮"开放思路"复核了 §8/§9 的结论，纠正了两个误判，并备齐了离线提密钥所需的全部素材。
+
+### 10.1 内存里直接拿到 video_model + 对齐密文(已做)
+- 用**异步 `Memory.scan`** 扫 rw 段找字符串 `"spade_a"`，**秒级命中**正在播视频的完整 video_model JSON
+  （脚本 `frida/dump_videomodel.js` + `frida/dump_run.py`，命中存 `capture/mem_hit_*.txt`）。
+  → 证明做**逐视频"密钥/密文预言机"**完全可行（类比签名预言机：驱动 app 加载某 vid → 内存里就有它的
+  spade_a/kid，且 app 已在端上把它解成 16B 内容密钥）。
+- 从命中里提取完整 `main_url` 并**直链下载到密文**（CDN 不需签名），存 `capture/ct/hit1.mp4`、`hit3.mp4`。
+  脚本 `frida/extract_urls.py`(→`capture/hits_meta.json`)、`frida/dl_analyze.py`。
+- 现有**两组对齐样本**(kid + spade_a + 密文文件 + size)，外加 §7 的 ep3，共 3 组可用于密钥/IV 验证。
+
+### 10.2 纠正一：`check_info` 不是加密范围图(是下载完整性 CRC)
+`encrypt_info` 同级有 `"check_info":{"check_info":"c:0-129081-3a89|e:0-511-3284,512-1023-de07"}`。
+- `c:0-129081-3a89` 的范围 `0..129081` 恰好 = ftyp+moov+free（mdat 数据前的全部头部，hit1 mdat 数据起于
+  文件偏移 129090）→ `c` = **头部区 CRC16**。
+- `e:0-511,512-1023` = 相对 mdat 数据起点的首 1024 字节两个 512 块的 CRC16 → 一度以为"只加密前 1KB"，
+  但**实测推翻**：用 stsc+stco 算出**真实**样本偏移后，video sample#1(mdat 偏移 19225，远超 1024)的
+  4 字节"NAL 长度前缀"仍是乱码大数(2710694671) → **加密不止 1KB**。故 `c/e` 是 **AVMDL 下载头校验**
+  (防劫持/损坏)，**与加密范围无关**。脚本 `frida/probe_plain2.py`。
+- 同时**排除了 CENC 子样本方案**(子样本会留明文 NAL 头/长度) → 红果是**从字节 0 起的全样本 AES-CTR**，
+  与 §9 "无 senc/tenc 盒子、私有承载" 一致。
+
+### 10.3 纠正二：内存只有 ~684MB 驻留(§8 的"5.7GB 扫不完"过悲观)
+`/proc/313/status`：`VmRSS≈1020MB, RssAnon≈684MB, RssFile≈244MB`。rw **虚拟**映射确为 7.8GB(scudo 保留)，
+但**驻留匿名页仅 ~684MB**——这才是密钥/AES 轮密钥所在。**aeskeyfind 只需扫这 ~684MB**，量级完全可处理
+(numpy 向量化几秒级)。§8 把虚拟映射当成必扫量，结论过悲观。
+
+### 10.4 spade_a 结构(肉眼解不开，需 .so)
+3 组 spade_a(base64→**37 字节**) 对比(脚本 `frida/spade_struct.py`)：
+- `byte[1]=0xbc` 跨样本**恒定**(疑版本/头)；`byte[35]==byte[36]` 跨样本**恒等**(疑校验/padding)；其余高熵。
+- 与 kid 做 XOR **无固定关系** → 是真正**加密/包装的 blob**，需 .so 里的 unwrap 算法(固定 SDK 密钥)，
+  无法靠结构猜解。
+- kid 自身有结构：`6a1978c1|f8818b|00.. / 6a1165c8|f8818b|..|0002ebeb`，中段 `f8818b`、尾 `0002ebeb` 恒定
+  → kid 像"key-server id + 视频派生"，但内容密钥仍由 spade_a 承载(离线可解，无需播放期 key API)。
+
+### 10.5 收敛后的两条落地路(差本机工具/需授权时段)
+| 路 | 做法 | 产出 | 阻碍 |
+|---|---|---|---|
+| **B-离线 aeskeyfind**(本环境最优, 不需新装反汇编器) | root shell 读 `/proc/313/mem` 仅驻留页(~684MB)→ host 上 numpy 跑 aeskeyfind 找 AES-128 轮密钥候选 → 用对齐密文+已知明文(NAL 长度前缀/MediaCodec 抓的真实明文)逐 IV 假设验证(IV∈{0, kid, per-sample…}) | 该视频 16B 密钥 → 做**逐视频密钥预言机**(驱动 app 加载 vid→内存提密钥→离线全速解) | ①正确读 /proc/mem 内存空洞需原生 aeskeyfind(NDK 编译)或谨慎分页读取；②**生产风险**：须避开签名 agent，授权时段做；③字节自实现 AES 若非标准轮密钥布局, aeskeyfind 可能识别不到 |
+| **B2-逆 spade_a**(一劳永逸的纯代码通解) | Ghidra/IDA 逆 `libEncryptor`/`libdragon_crypt` 的 spade_a(37B)→16B 算法(固定 SDK 密钥) | **纯代码解所有视频**(第三方做法) | 需反汇编器 + OLLVM 混淆功底 |
+
+### 10.6 一句话
+问题已**精确收敛**为"取 16B 内容密钥(per-video) + 定 IV 规则"，且素材齐备(可秒取内存 video_model、可下对齐密文、
+驻留内存仅 684MB)。**B 路(离线 aeskeyfind)在本环境可行且不需新装反汇编器**，但要在不影响生产签名的前提下、
+用 root /proc/mem 离线进行；**B2 路(逆 spade_a)是纯代码通解**，需 Ghidra。等用户定方向与授权时段。
