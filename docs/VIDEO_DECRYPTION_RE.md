@@ -346,3 +346,39 @@ MC.queueInputBuffer.implementation=function(idx,off,size,pts,flags){
 问题已**精确收敛**为"取 16B 内容密钥(per-video) + 定 IV 规则"，且素材齐备(可秒取内存 video_model、可下对齐密文、
 驻留内存仅 684MB)。**B 路(离线 aeskeyfind)在本环境可行且不需新装反汇编器**，但要在不影响生产签名的前提下、
 用 root /proc/mem 离线进行；**B2 路(逆 spade_a)是纯代码通解**，需 Ghidra。等用户定方向与授权时段。
+
+---
+
+## 11. 发散探索：本地存储/代理路线 + MediaCodec 路线重分析(2026-06-01)
+
+### 11.1 为什么红果自己能播放 → 密钥存储机制(重要)
+- offline `.mdl` 文件开头是 **`fffe00...`**（AVMDL 私有格式，非 mp4），全程加密分块，无"播放前解密存盘"。
+- **密钥材料存在 `series_download_db.t_series_video_model`**（已拉到本机分析）：
+  完整 video_model JSON，含 `kid/spade_a/main_url`——每次播放时 AVMDL 取出 spade_a → libEncryptor 解包 → 16B 内容密钥 → 实时解密。
+- 结论：spade_a 解包算法是**纯本地、离线可用**（不需网络/DRM 服务器）。包装密钥在 libEncryptor.so 的 `.text`/立即数里，**不在 `.rodata`**（已扫全 .rodata + .data 无命中）。
+
+### 11.2 本地缓存文件结构(新发现)
+- `ttvideo_offline/*.mdl` = AVMDL 分块私有格式（fffe 头），同目录的 `*.mdlnodeconf`(288B) 是元数据（含 `ttmd` 容器 + `fkey`=MDL 文件 hash）。
+- `cache/short/*.mdl` = 流式缓存，mp4 格式但 stsd 含 `encv` box（标准 CENC 保护视频），仍加密。
+- 两种 .mdl 都是加密存储，播放时实时解密。
+- `TTVideoEngine_download_database_v01`：key-value 表，存下载任务的 `media_keys`（MDL 文件 hash 列表）和 `encrypt_version=1`，但**不存内容密钥**。
+
+### 11.3 真实加密模块集(进程内已加载)
+通过 `/proc/<pid>/maps` 确认，app 实际加载：`libEncryptor.so`(84KB), `libgecko_encrypt.so`(18KB, Gecko 网络加密，与视频无关), `libdragoncore.so`(371KB, ELF 头故意损坏/混淆), `libavmdlbase.so`, `libavmdlv2.so`, `libttcrypto.so`。
+- **`libEncryptor.so`** 的 `Process.findModuleByName()` 在 frida 里返回 null → Android linker namespace 隔离（在 maps 里存在但 frida 不可见）。
+- **`libdragoncore.so`** ELF 节头全部故意损坏（所有 section name = "?"），是防逆向的定制格式；实际大小 371KB，可能包含 spade_a 解包核心。
+- `.so` 的 `.rodata` 扫描（4字节步进）: libEncryptor(1709个16B块) + libdragoncore/libdragon_crypt 均无双视频一致性命中 → **包装密钥是 ARM64 立即数（不在 .rodata）**，或运行时派生。
+
+### 11.4 MediaCodec 路线重分析(关键修正)
+- `Java.choose('android.media.MediaCodec')` 能找到两个 `OMX.qcom.video.decoder.hevc` 实例 → 正常。
+- 但 `queueInputBuffer`（Java 和 native `AMediaCodec_queueInputBuffer`）全 0 触发 → **原因：Android 10+ media.codec 独立进程**（PID 8259，用户 `mediacodec`）+ **tunneled/secure 模式下数据走共享内存 / 安全域，不走 app 进程内 queueInputBuffer**。
+- §7 成功的是**在线流**（standard mode），当前离线 .mdl 播放走 **tunneled secure path** → Java/NDK hook 无效。
+- **MediaCodec 路线对离线播放无效**。对在线流仍有效（需时序同步：hook 先跑，再在 app 里播放在线视频）。
+
+### 11.5 剩余可落地路线
+| 优先 | 路线 | 关键障碍 |
+|---|---|---|
+| ★★★ | **在线流 MediaCodec 抓取**（§7 路线）| 时序：hook 已就绪后，app 内播放在线视频（非下载）即可触发；需 1 集实时时间 |
+| ★★ | **libEncryptor.so ARM64 立即数扫描** | 找 `.text` 里 `MOVK/MOV/LDR` 序列组成的128bit常量（无需 IDA，Frida 可遍历指令）|
+| ★★ | **注册 native 方法截获 + memcpy hook** | libEncryptor 在 linker namespace 里，frida `findModuleByName` 找不到 → 需改用 `/proc/self/maps` 手工读基址 |
+| ★ | **逆 libdragoncore.so** | ELF 故意损坏，需手工解析段或用 binwalk；371KB，可能是 spade_a 解包核心 |
