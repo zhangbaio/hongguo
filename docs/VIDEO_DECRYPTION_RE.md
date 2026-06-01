@@ -1,8 +1,7 @@
 # 红果视频解密 逆向进度与后续思路
 
-> 状态：**可行性已确认（机制清楚），但提取未攻克**。当前下载到的视频是「完整但加扰」的
-> 加密码流，标准播放器/上传平台无法解码。本文记录已查清的事实、试过的路、失败原因、以及
-> 后续可走的方案，供后续接力。
+> 状态：**视频解密已攻破（思路 D：MediaCodec 明文捕获法，已端到端验证出可播画面）**。
+> 详见文末「§7 突破」。下方 §1~§6 为攻破前的探查记录，保留作背景。
 >
 > 最后更新：2026-06-01
 
@@ -144,7 +143,60 @@
 
 ---
 
-## 6. 一句话现状
-机制已透（端上 AVMDL 解密 + 127.0.0.1:61819 代理），但**所有黑盒 hook 点都被 native/OLLVM 挡住**，
-当前环境无反汇编工具。**下一步优先验证「思路 D：hook MediaCodec.queueInputBuffer」**——这是最可能
-不反汇编就拿到明文 HEVC 基本流的路；不行再上思路 C/B；业务上先用思路 A 兜底。
+## 6. 一句话现状（攻破前）
+机制已透（端上 AVMDL 解密 + 127.0.0.1:61819 代理），但黑盒 hook 点都被 native/OLLVM 挡住。
+下一步优先验证「思路 D」。→ **已验证成功，见 §7。**
+
+---
+
+## 7. 突破：思路 D 成功（MediaCodec 明文捕获法）✅
+
+### 核心原理
+红果在 MuMu 上用**系统 `MediaCodec`** 解码 HEVC（`createDecoderByType` → `OMX.qcom.video.decoder.hevc`，
+实测播放时 `queueInputBuffer` 持续触发）。MediaCodec **只能吃明文**（非 MediaCrypto 安全路径，
+`crypto=null`），所以**喂进解码器前数据已被端上解密**。我们在解码器入口截获即得明文。
+
+### 实测验证
+- hook `android.media.MediaCodec.queueInputBuffer(idx,off,size,pts,flags)`，用 `this.getName()`
+  含 `hevc` 锁定 HEVC 解码器实例；从 `getInputBuffer(idx)` 读 `off..off+size` 字节。
+- 抓到的 buffer **全部是 Annex-B 明文**：每个以 `00 00 00 01` 起始码 + 合法 HEVC NAL 头（slice 为主，
+  `flags=0`）。一整集抓到 **1374 帧 / 4,015,229 字节**。
+- 参数集 VPS/SPS/PPS **不在 queueInputBuffer**（经 configure 的 csd 传入；而解码器是复用的、
+  configure 早于 hook），改为**手工解析原加密文件的 `hvcC` box**（在明文 moov 里，不受 mdat 加密影响；
+  注意 `ffmpeg -bsf hevc_mp4toannexb` 会因处理加密 packet 而失败，必须自己按 box 结构解析）。
+  解析出 `[(32,VPS 29B),(33,SPS 84B),(34,PPS 7B),(39,SEI 41B)]`，转 Annex-B 拼到帧前面。
+- `ffmpeg -f hevc -i 拼接.h265 -c copy out.mp4` → 解码 **无 "Invalid NAL unit size"**，
+  `hevc(Main) 1080x1920 25fps`，成功解出 1300 帧；抽帧 JPG 为**清晰真实剧集画面** → 端到端成立。
+
+### 关键代码要点（接力直接用）
+```js
+// Frida: 抓 HEVC 解码器输入(明文 Annex-B), 写设备文件
+var MC=Java.use("android.media.MediaCodec"); var fos=Java.use("java.io.FileOutputStream").$new(path);
+MC.queueInputBuffer.implementation=function(idx,off,size,pts,flags){
+  if((""+this.getName()).toLowerCase().indexOf("hevc")>=0 && size>4){
+    var bb=this.getInputBuffer(idx); bb.position(off);
+    var a=Java.array('byte',new Array(size).fill(0)); bb.get(a); fos.write(a,0,size); // 明文帧
+  }
+  return this.queueInputBuffer(idx,off,size,pts,flags);
+};
+```
+```python
+# 解析 hvcC(原加密文件明文 moov) 取参数集 -> Annex-B; 拼到抓取的帧前 -> ffmpeg -f hevc -c copy 重封装
+```
+- 拉设备文件：`adb exec-out su -c "cat <appext路径>" > local.h265`（普通 pull 因 scoped storage 可能失败）。
+
+### 待完善（production pipeline）
+1. **音频**：原 AAC 也被加密（`channel element not allocated`）。同法 hook **AAC 解码器**的
+   `queueInputBuffer`（`getName` 含 `aac`/mime `audio/mp4a`）抓明文 AAC，与视频 mux。
+   或确认音频是否有未加密变体。
+2. **时间戳**：用 `queueInputBuffer` 的 `presentationTimeUs` 给每帧打 pts，避免 dts 非单调警告，
+   保证音画同步（重封装时 `-fflags +genpts` 或自建 timestamp）。
+3. **逐 vid 编排**：需驱动 app **完整播放指定剧集**（MediaCodec 只解正在播的帧），并用该 vid
+   自己的 `hvcC`。input 控制在 MuMu 不稳定（adb swipe/tap 时灵时不灵，tap 易暂停）——production 建议
+   真机 + 可靠 UI 自动化(uiautomator2/minitouch)，或 deeplink 直达播放页；播放需实时(约1集≈1分钟)。
+4. **集成**：做成"视频解密预言机"（类比签名预言机），下载器请求某 vid → 预言机驱动播放+抓流+
+   取 hvcC+mux → 返回可播 mp4。注意这是**实时捕获**，吞吐受限(≈1集/分钟/设备)，上规模需多设备。
+
+### 结论
+**视频解密在工程上已打通**：不需要逆 OLLVM/AES，借 app 自己的解码器在 MediaCodec 入口取明文即可。
+剩下是把"抓取"产品化（音频+编排+集成），属常规工程，非逆向难题。
