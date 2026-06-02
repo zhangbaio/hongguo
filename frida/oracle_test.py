@@ -26,28 +26,42 @@ rpc.exports={
     }
     return {raw:raw,models:out};
   },
-  // 2) 扫 kid(binary 16B), 收集附近±4KB所有16B候选key + 8B候选iv(高8非零低8零)
+  // 2) 扫 kid(binary 16B); 对每个高熵16B候选key, 收集其±256字节内的8B候选iv(就近配对, 减组合)
   keybox:function(kidhex){
     var kid=[];for(var i=0;i<32;i+=2)kid.push(parseInt(kidhex.substr(i,2),16));
     var pat=kid.map(function(b){return(b<16?'0':'')+b.toString(16)}).join(' ');
-    var keys={};var ivs={};var hits=0;
+    var groups={};var hits=0;var WIN=4096;var NEAR=256;
+    function hx(w,o,n){var h='';for(var k=0;k<n;k++)h+=(w[o+k]<16?'0':'')+w[o+k].toString(16);return h;}
     var rs=Process.enumerateRanges('rw-').filter(function(r){return r.size<64*1024*1024;});
     for(var ri=0;ri<rs.length;ri++){
       var ms;try{ms=Memory.scanSync(rs[ri].base,rs[ri].size,pat);}catch(e){continue;}
       for(var mi=0;mi<ms.length;mi++){hits++;
-        try{var w=new Uint8Array(ms[mi].address.sub(4096).readByteArray(8192));
+        if(hits>40)break; // 同struct重复多, 取前若干个kid命中即可
+        try{var w=new Uint8Array(ms[mi].address.sub(WIN).readByteArray(WIN*2));
+          // 先找窗口内所有候选key位置 + 所有iv
+          var keypos=[];var ivlist=[];
           for(var o=0;o+16<=w.length;o+=4){
-            var nz=0,distinct={};for(var k=0;k<16;k++){if(w[o+k])nz++;distinct[w[o+k]]=1;}
-            var h='';for(var k=0;k<16;k++)h+=(w[o+k]<16?'0':'')+w[o+k].toString(16);
-            if(nz>=12&&Object.keys(distinct).length>=10)keys[h]=1;
+            var nz=0,dd={};for(var k=0;k<16;k++){if(w[o+k])nz++;dd[w[o+k]]=1;}
+            if(nz>=12&&Object.keys(dd).length>=10) keypos.push(o);
             var lo0=true;for(var k=8;k<16;k++)if(w[o+k]){lo0=false;break;}
             var hinz=false;for(var k=0;k<8;k++)if(w[o+k]){hinz=true;break;}
-            if(lo0&&hinz){var iv='';for(var k=0;k<8;k++)iv+=(w[o+k]<16?'0':'')+w[o+k].toString(16);ivs[iv]=1;}
+            if(lo0&&hinz) ivlist.push([o,hx(w,o,8)]);
+          }
+          // 每个key配其±NEAR内的iv
+          for(var ki=0;ki<keypos.length;ki++){
+            var ko=keypos[ki];var kh=hx(w,ko,16);
+            if(!groups[kh])groups[kh]={};
+            for(var ii=0;ii<ivlist.length;ii++){
+              if(Math.abs(ivlist[ii][0]-ko)<=NEAR) groups[kh][ivlist[ii][1]]=1;
+            }
           }
         }catch(e){}
       }
+      if(hits>40)break;
     }
-    return {hits:hits,keys:Object.keys(keys),ivs:Object.keys(ivs)};
+    var out=[];var allivs={};
+    for(var kh in groups){var ivs=Object.keys(groups[kh]);out.push([kh,ivs]);for(var x=0;x<ivs.length;x++)allivs[ivs[x]]=1;}
+    return {hits:hits,groups:out,allivs:Object.keys(allivs)};
   }
 };
 """
@@ -100,70 +114,68 @@ def samp0(d,tr):
     if not stsz or not stco:return None
     ss=u32(d,stsz[0]+4);sz0=ss if ss else u32(d,stsz[0]+12);return u32(d,stco[0]+8),sz0
 
-# 对每个 model 试预言机
-for m in models[:6]:
-    kid=m["kid"];url=m["url"]
-    print(f"\n=== oracle for kid={kid} ===")
-    # 下 sample0
-    try:
-        data=urllib.request.urlopen(urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0","Range":"bytes=0-900000"}),timeout=15,context=ctx).read()
-        if data[4:8]!=b'ftyp': print("  非mp4,跳过");continue
-        mds=find(data,[b"mdat"])[0];vt=[t for t in traks(data) if hdlr(data,t)==b"vide"]
-        if not vt:continue
-        r=samp0(data,vt[0]);off0,sz0=r;mo=off0-mds
-        cipher=data[off0:off0+16]
-    except Exception as e: print(f"  下载失败{e}");continue
-    tk=time.time()
-    kb=api.keybox(kid)
-    print(f"  [{time.time()-tk:.1f}s] kid命中{kb['hits']}次, 候选key={len(kb['keys'])} 候选iv={len(kb['ivs'])}")
-    # 存盘所有候选+密文, 供离线反复验证(避免重复抓取)
-    json.dump({"kid":kid,"url":url,"sz0":sz0,"mo":mo,"off0":off0,
-               "cipher64":data[off0:off0+64].hex(),"full_sample0":data[off0:off0+sz0].hex(),
-               "keys":kb["keys"],"ivs":kb["ivs"]},open("capture/oracle_data.json","w"))
-    print(f"  已存 capture/oracle_data.json (供离线验证)")
-    # 验证: (key,iv) 使 解密sample0 头4字节=NAL长度合理 且 NAL头合法
-    # sample0 是首样本(IDR), 全样本加密含4字节长度前缀; CTR原点=样本起点co; iv=(iv8<<64)
-    tv=time.time();found=None
-    # 过滤假密钥候选: 去掉含堆指针碎片(4字节对齐处出现 0x79xx/0x00007 高位)或零字节过多的
-    def looks_ptr(b):
-        z=b.count(0)
-        if z>=4: return True
-        for k in range(0,16,4):
-            v=struct.unpack("<I",b[k:k+4])[0]
-            if 0x79000000<=v<0x80000000 or 0x70000000<=v<0x80000000: return True  # arm64堆ptr低32
-            hi=struct.unpack(">H",b[k+2:k+4])[0] if k+4<=16 else 0
-        return False
-    keys=[bytes.fromhex(h) for h in kb["keys"] if not looks_ptr(bytes.fromhex(h))]
-    ivs=[bytes.fromhex(h) for h in kb["ivs"]]
-    print(f"  过滤后候选key={len(keys)} (原{len(kb['keys'])}), iv={len(ivs)}")
-    # 整段sample0密文(用于强验证NAL链)
-    full=data[off0:off0+sz0]
-    def walk_ok(pt):  # NAL链是否精确填满sz0且头合法
-        p=0;n=0
-        while p+4<=len(pt):
-            L=struct.unpack(">I",pt[p:p+4])[0]
-            if L==0 or p+4+L>sz0: return False
-            nh=pt[p+4]
-            if (nh>>7)&1 or ((nh>>1)&0x3f)>40: return False
-            p+=4+L;n+=1
-        return p==sz0 and n>=1
-    import itertools
-    cnt=0
-    for K in keys:
-        ec=AES.new(K,AES.MODE_ECB)
-        for iv8 in ivs:
-            cnt+=1
-            ks0=ec.encrypt((int.from_bytes(iv8,"big")<<64).to_bytes(16,"big"))
+def walk_ok(pt,sz0):
+    p=0;n=0
+    while p+4<=len(pt):
+        L=struct.unpack(">I",pt[p:p+4])[0]
+        if L==0 or p+4+L>sz0: return False
+        nh=pt[p+4]
+        if (nh>>7)&1 or ((nh>>1)&0x3f)>40: return False
+        p+=4+L;n+=1
+    return p==sz0 and n>=1
+
+def get_sample0(url):
+    data=urllib.request.urlopen(urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0","Range":"bytes=0-900000"}),timeout=15,context=ctx).read()
+    if data[4:8]!=b'ftyp': return None
+    mds=find(data,[b"mdat"])[0];vt=[t for t in traks(data) if hdlr(data,t)==b"vide"]
+    if not vt: return None
+    off0,sz0=samp0(data,vt[0])
+    return data,off0,sz0
+
+def validate(kb,data,off0,sz0):
+    cipher=data[off0:off0+16]; full=data[off0:off0+sz0]
+    cnt=0;strong=0
+    for kh,ivhexs in kb["groups"]:
+        K=bytes.fromhex(kh); ec=AES.new(K,AES.MODE_ECB)
+        for ivh in ivhexs:
+            iv8=int.from_bytes(bytes.fromhex(ivh),"big"); cnt+=1
+            ks0=ec.encrypt((iv8<<64).to_bytes(16,"big"))
             L=struct.unpack(">I",bytes(a^b for a,b in zip(cipher[0:4],ks0[0:4])))[0]
-            if L!=sz0-4: continue  # 强约束: 单NAL精确长度
-            # 确认: 解密整样本走NAL链
-            ctr=Counter.new(128,initial_value=(int.from_bytes(iv8,"big")<<64))
-            pt=AES.new(K,AES.MODE_CTR,counter=ctr).decrypt(full)
-            if walk_ok(pt): found=(K,iv8);break
-        if found:break
-    if found:
-        print(f"  [{time.time()-tv:.1f}s验证, {cnt}组合] *** KEY={found[0].hex()} base_iv={found[1].hex()} ***")
-        print(f"  >>> 密钥预言机成功! 取key+iv总耗时(扣除找model) {time.time()-tk:.1f}s")
-        json.dump({"kid":kid,"key":found[0].hex(),"base_iv":found[1].hex()},open("capture/oracle_key.json","w"),indent=2)
-    else:
-        print(f"  [{time.time()-tv:.1f}s] {cnt}组合 无匹配(key不在内存/未prepare/sample0非单NAL)")
+            nh=cipher[4]^ks0[4]
+            if not(0<L<=sz0-4 and (nh>>7)&1==0 and ((nh>>1)&0x3f)<=40): continue
+            strong+=1
+            pt=AES.new(K,AES.MODE_CTR,counter=Counter.new(128,initial_value=(iv8<<64))).decrypt(full)
+            if walk_ok(pt,sz0): return K,bytes.fromhex(ivh),cnt,strong
+    return None,None,cnt,strong
+
+# 外层重试: 每轮扫models, 对每个kid快速查一次keybox, 只验证"正在解码"(命中>0)的那个
+done=False
+for rnd in range(1,7):
+    if done: break
+    res=api.models(); models=res["models"]
+    print(f"\n[round{rnd}] models={len(models)}")
+    for m in models:
+        kid=m["kid"]
+        kb=api.keybox(kid)
+        if kb["hits"]==0:
+            print(f"  kid={kid[:14]} 未解码(0命中)"); continue
+        ng=len(kb["groups"]); niv=sum(len(g[1]) for g in kb["groups"])
+        print(f"  kid={kid[:14]} *正在解码* 命中{kb['hits']} key组{ng} 就近iv{niv}")
+        try: r=get_sample0(m["url"])
+        except Exception as e: print(f"   下载失败{e}"); r=None
+        if not r: print("   sample0取失败"); continue
+        data,off0,sz0=r
+        json.dump({"kid":kid,"url":m["url"],"sz0":sz0,"off0":off0,
+                   "full_sample0":data[off0:off0+sz0].hex(),"groups":kb["groups"],"allivs":kb["allivs"]},
+                  open(f"capture/oracle_{kid[:8]}.json","w"))
+        tv=time.time()
+        K,iv8,cnt,strong=validate(kb,data,off0,sz0)
+        if K:
+            print(f"   [{time.time()-tv:.1f}s,{cnt}组合/{strong}过弱筛] *** KEY={K.hex()} base_iv={iv8.hex()} ***")
+            print(f"   >>> 密钥预言机成功!")
+            json.dump({"kid":kid,"key":K.hex(),"base_iv":iv8.hex()},open("capture/oracle_key.json","w"),indent=2)
+            done=True; break
+        else:
+            print(f"   [{time.time()-tv:.1f}s] {cnt}组合({strong}过弱筛) 无匹配 (已存oracle_{kid[:8]}.json供离线调)")
+    if not done: time.sleep(3)
+if not done: print("\n未成功: 没有正在解码的model命中, 或验证未匹配(保持单个在线视频持续播放再试)")
