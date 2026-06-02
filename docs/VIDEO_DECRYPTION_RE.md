@@ -460,3 +460,45 @@ MC.queueInputBuffer.implementation=function(idx,off,size,pts,flags){
 **内容密钥经密码学验证确认"不在内存里"(硬件/自定义 AES), aeskeyfind 路线证伪。** 能离线全速解密的纯代码方案
 **必须逆 spade_a(需 Ghidra)**; 不装反汇编器的话, **唯一可用的是 §7 MediaCodec 实时抓取**(已验证, 实时速度, 可并行)。
 序列匹配/keystream 恢复/同步 dump 工具链均已就位并验证, 留作接力基础。
+
+---
+
+## 14. 🎉 攻破：离线提取内容密钥 + 全视频解密成功(2026-06-01 终极突破)
+
+§13 判定"密钥不在内存"是**错的(只对了一半)**: 标准 AES **轮密钥扩展**确实不在内存(硬件/自定义AES),
+但**原始16字节密钥本身在内存**——aeskeyfind 找的是176字节扩展, 没找原始key。改用**原始密钥暴力**即破。
+
+### 14.1 攻破方法(端到端, 已验证产出可播画面)
+1. **抓明文**: 在线播放→hook MediaCodec.queueInputBuffer 抓解码前HEVC ES(脚本 endgame4.py)。
+2. **序列匹配**: 明文连续帧大小序列 ↔ 密文 stsz 样本序列, 8帧精确吻合→确定性对齐(match_sequence/endgame4)。
+3. **恢复keystream**: 明文NAL体 XOR 密文样本体。
+4. **同步dump**: 解码时 root dd /proc/pid/mem 驻留native段(~4GB)。
+5. **原始16B密钥暴力**: 对每个16字节对齐窗口K, 用keystream两相邻块做 counter-diff
+   (`AES-dec(K,blkB)-AES-dec(K,blkA)==1`, 免IV)。脚本 focused_brute.py, ~14min扫完4GB。
+   **命中**: key=`e65f045ea495e9cb439fa87fed02d756`。
+6. **关键对齐**: 密文样本4字节长度前缀**也被加密**(读出是乱码) → CTR原点=样本起点co(含长度前缀),
+   NAL体在+4 → keystream干净块边界 i0=12。(由 check_align2.py 读长度前缀是否明文确定。)
+
+### 14.2 加密方案(完全确定, CENC标准)
+- **AES-128-CTR**, 逐视频密钥(spade_a解出), 全样本加密(含4字节NAL长度前缀)。
+- **per-sample IV(16字节)** = `[高64位: base_iv64 + 样本序号][低64位: 块计数器从0]`。
+  实测 sample#1 IV=`8a3366122cfe6f55..`, sample#2=`..6f56..` 逐样本+1; base(sample#0)=`8a3366122cfe6f54`。
+- 解密: 对样本N, `IV=((base_iv64+N)<<64)`, AES-128-CTR(key, IV) 解密整个样本字节。
+
+### 14.3 验证(decrypt_full.py)
+- 解密样本#1: 头4字节=NAL长度8462=精确匹配; 解密body == MediaCodec抓的明文body (True)。
+- **全视频 5575/5575 样本解密后 NAL 结构全合法**; ffmpeg `-map 0:v` 零错误解码; 抽帧=真实剧集画面("清风客栈")。
+- → **离线全速解密成立**(不再需实时MediaCodec)。产物 capture/decrypted_video.mp4(视频track已解密;音频track是另一track,需其key/IV)。
+
+### 14.4 距离"通用下载器"还差(每视频需要 key + base_iv64)
+- **key(16B)**: 当前靠内存暴力(~14min/视频, 太慢)。提速路: ①now有已知(key,视频)对+key在内存offset→
+  可定位其所在分配/hook spade_a解包函数输出做**快速密钥预言机**; ②逆spade_a(Ghidra)纯代码通解。
+- **base_iv64(8B)**: 当前靠 key+一帧明文keystream 反推。待查: 是否在 video_model.encrypt_info 里,
+  或可由 kid/spade_a 派生(若是→无需明文)。
+- **音频**: 另一track, 同法(可能同key不同base_iv, 或不同key)。
+- 一旦把"取key+base_iv"做成预言机或纯代码 → 下载器可离线全速解密所有视频, 大规模并行无需播放。
+
+### 14.5 一句话(终极)
+**红果视频解密已在密码学层面完全攻破**: 标准AES-128-CTR, 原始密钥可从内存暴力提取(counter-diff验证),
+IV是CENC标准(per-sample base+序号), 已端到端解出整段可播视频。剩下是把"每视频取key+base_iv"
+产品化(密钥预言机 或 逆spade_a纯代码), 属工程收尾。
