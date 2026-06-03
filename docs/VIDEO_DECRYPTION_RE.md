@@ -600,3 +600,17 @@ ghidra_callers.py; 脚本 tools/ghidra_scripts/*.java)。
 - **纯静态逆spade_a**(env无关): 追 FUN_0053d890 的 param_2(内容密钥) 上游调用链 → spade_a(37B)→16B 解包算法。
   深度OLLVM, 多轮静态分析。ghidra_callers.py 可逐层找调用者反编译。
 - 已验证可用的离线解密(§14, raw-key内存暴力+counter-diff)仍是最稳妥的产品化基础。
+
+### 15.11 静态逆 spade_a 调用链 — native解密链已完整, spade_a解包在Java侧(2026-06-01)
+用 ghidra_callers.py 逐层上溯 FUN_0053d890, 完整映射 libavmdlv2 的 native 流解密链:
+- **FUN_0053d890(ctx,key,iv)** [AES-CTR init] ← **FUN_00501b8c / FUN_00501c8c** [解密分发器: switch(*method) 0=无/
+  1,3=轻量XOR(异或0x74链)/2=AES-CTR; key=ctx+8, iv=ctx+0x18] ← **FUN_0050424c(用ctx=*(parent+0xd8))** /
+  **FUN_004b5f78(用ctx=*(parent+0x140))** ← (13+个调用者, 发散; 解密是通用流接口)。
+- FUN_00501da0(ctx,method,data,len): 仅当 AES且data<16B 时用0x74补齐padding, 与密钥无关。
+- **关键定论**: **libavmdlv2.so 内无 spade_a/encrypt_info/cenc 字符串** → spade_a 的JSON解析在**Java侧**;
+  且内存"密钥盒"是 **Java 标签化map(二进制kid+16Bkey)** → **spade_a(37B)→16B内容密钥的解包发生在 Java 侧
+  (或经JNI的native unwrap), 不在native AES解密链内**。native 只是从 ctx+8 取已备好的key做CTR。
+- **继续逆 spade_a 的正确方向 = 分析 Java/APK 侧**: 用 jadx 反编译 base.apk, 找处理 encrypt_info.spade_a→
+  填充密钥盒(kid->key byte[])的类/方法; 它可能纯Java实现, 或调某native(libEncryptor的非ttEncrypt函数?)。
+  ctx+8 的key由Java经 AVMDLDataLoader 的 native API(addDataSource/setStringValue等)传入native。
+- 务实对比: 逆spade_a跨Java↔native+OLLVM, 是多日工程; 而 hook FUN_0053d890 取key+iv(§15.9)只差解码环境。
