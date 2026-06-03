@@ -1,17 +1,15 @@
 # 红果视频解密 逆向进度与后续思路
 
-> 状态：**视频解密已攻破（思路 D：MediaCodec 明文捕获法，已端到端验证出可播画面）**，
-> 但该法**实时(1x, ~1集/分钟)**。提速探索见「§8」：所有"快过实时/离线破解"路线在当前环境均被堵死
-> （AES + OLLVM 无符号 + 无 S-box + 模拟器 5.7GB 内存 + 播放时钟限速），**能落地的提速只有并行化 MediaCodec 抓取**。
-> 详见文末「§7 突破」「§8 吞吐探索」「§9 标准CENC定性」「§10 离线提密钥可行性修正」。下方 §1~§6 为攻破前的探查记录，保留作背景。
+> **🆕 新接手者请先读文末「§16 接力指南」**（自包含：加密方案/全链路架构/密钥盒结构/已排除假设/后续方向/文件清单/真值样本/环境坑）。
 >
-> **§10 关键修正(2026-06-01)**：①§8 "5.7GB 内存扫不完" 判断有误——进程 **RssAnon 仅 ~684MB**（驻留），
-> 5.7GB 是虚拟映射，aeskeyfind 实际只需扫驻留堆，**离线提密钥可行性大幅提升**；②video_model（含
-> spade_a/kid/main_url）**可在内存中快速 Memory.scan 命中**，且 CDN 密文可直链下载 → 已具备"对齐的密文+
-> 元数据"；③`check_info` 的 `c:`/`e:` 是 **AVMDL 下载完整性 CRC**（头部+首1KB），**不是加密范围图**，
-> 实测确认仍是**全样本 AES-CTR**（逐视频密钥）。
-> ⚠ **风险**：本机 MuMu+frida 签名栈是线上生产签名后端，提密钥的内存操作须用 root shell 读
-> `/proc/mem`（独立进程，不碰 frida）以免冻死签名，且建议在低峰授权时段进行。
+> 状态（2026-06-04）：视频加密=**标准 CENC AES-128-CTR，密码学层面已完全攻破**（§14，`frida/decrypt_full.py` 端到端解出可播视频，5575/5575 样本合法）。
+> 通用下载器只差**每视频取 `content key(16B)+base_iv64(8B)`**。两条路：
+> **(A) 运行时密钥盒预言机**——播放时从 libavmdl 内存提 `kid→key→base_iv`，结构已破、`extract_keybox_pairs.py` 就绪（推荐）；
+> **(B) 离线纯代码逆 `spade_a→key`**——已确认 key 端上本地计算（非网络），用内嵌静态 KEK 的 AES，藏在 6MB OLLVM 的 libavmdl，**KEK 尚未定位**。
+>
+> 本文档为**时间顺序逆向日志**（§1~§15）+ **§16 接力指南**。§1~§6 为攻破前探查（背景）；§7 MediaCodec 实时抓取法（已验证，~1集/分钟，慢但可用）；
+> §9 CENC 定性；§13 内存 aeskeyfind 证伪→改用原始密钥 counter-diff 爆破；§14 离线攻破；§15 预言机+Ghidra 定位解密函数+spade_a 链路；§16 汇总接力。
+> ⚠ **风险**：MuMu+frida 签名栈是线上生产签名后端，提密钥的内存操作用独立 root shell 读 `/proc/mem`（不碰 frida）以免冻死签名。详见 §16.9。
 >
 > 最后更新：2026-06-01
 
@@ -673,3 +671,127 @@ same_key_groups=1
 ```
 
 结论：`spade_a -> key` 不是直接子串、固定 16B XOR 掩码、或单字节固定 XOR 映射。两条不同 `kid/spade_a` 解出同一个 key，说明同一内容 key 可被不同包装 blob/track 引用；后续纯静态应继续定位 Java/native unwrap 函数，而不是再试简单线性规则。
+
+---
+
+## 16. 接力指南 / Handoff Guide（2026-06-04，本节面向新接手者，自包含）
+
+> 目的：不读完 §1–§15 也能快速接力。本节汇总「加密方案 / 完整逆向流程与关键节点 / 当前卡点 / 后续方向 / 文件清单 / 环境坑」。**后续每有进展，请在 §16.10 进度日志追加，并同步更新对应小节。**
+
+### 16.0 一句话现状
+红果视频加密=**标准 CENC AES-128-CTR**，密码学层面**已完全攻破**（§14，`decrypt_full.py` 端到端解出可播视频）。
+通用下载器只差**每个视频拿到 `content key(16B)` + `base_iv64(8B)`**。两条路：
+- **(A) 运行时密钥盒预言机 ✅ 已实现+端到端验证**：`frida/oracle.py --verify <密文>` 播放时 dump libavmdl 内存、提取所有 key/base_iv 候选、用密文自动试解出正确组合。见 §16.6-A。
+- **(B) 离线纯代码逆 `spade_a→key`**：理论可行（key 端上本地计算，非网络），但解包用**内嵌静态 KEK 的 AES**，藏在 6MB OLLVM 混淆的 libavmdl 里，**尚未定位到 KEK**。见 §16.6-B。
+
+### 16.1 加密方案（完全确定）
+- 算法：**AES-128-CTR**，**全样本加密**（含每样本开头 4 字节 NAL 长度前缀也加密；CTR 原点=样本起点）。
+- per-sample IV(16B) = `((base_iv64 + 样本序号) << 64)`（高 64 位=base_iv64+idx，低 64 位=块计数器从 0）。
+- 每个视频：`content key(16B)` 按 **kid** 唯一（同一视频多清晰度共享 kid/key）；`base_iv64` 按**清晰度/track**。
+- 实测真值见 §16.8。
+
+### 16.2 端到端解密流水线（已验证，`frida/decrypt_full.py`）
+输入：CDN 密文 mp4（可直链下载，无需登录）+ `key` + `base_iv64`。
+步骤：解析 moov/stsz/stco/stsc 得视频样本 (offset,size) → 逐样本 `AES-128-CTR(key, IV=((base_iv64+idx)<<64))` 解密整样本 →
+校验：解密后头 4 字节=NAL 长度，链式走到样本尾即合法。e4 实测 5575/5575 样本合法，ffmpeg 零错误。
+
+### 16.3 spade_a → 内容密钥 全链路架构（本次重大成果）
+```
+服务器 video_info JSON  (encrypt_info: {encrypt:true, kid, spade_a})
+  │  spade_a = base64( 37 字节包装 blob )；kid = 16 字节 CENC Key ID
+  ▼  [Java, base.apk, jadx 反编译于 capture/jadx_spade/]
+VideoModelPb.EncryptInfo{encrypt,kid,spadeA}
+  → VideoInfo.mSpadea / TTVideoEngineImpl.setEncodedKey()→mSpadea(只写不读)
+  → (decryption_key 字段→setDecryptionKey→mDecryptionKey→拼进 _mdlUrl；spade_a 走另一路)
+  ▼  [native, libuniplayer.so 主app arm64]
+FUN_0010fc78@0x10fc78  JSON 解析器：encrypt→struct+0x300, kid→+0x308, spade_a→+0x320, decryption_key→+0x378（仅存储，不解包）
+FUN_0010ed1c@0x10ed1c  struct→struct 搬运：spade→下游+0xd0, kid→+0x100（仅搬运）
+  ▼  [native, libavmdlv2.so —— 解包 + 解密都在这]
+??? 解包函数（未定位）：spade(37B) --内嵌静态 KEK 的 AES--> content key(16B)，写入「密钥盒」
+密钥盒(kid→key→base_iv) ──> AES-CTR 解密链：
+  FUN_00501b8c/FUN_00501c8c [分发器 switch(method): 2=AES-CTR, key=ctx+8, iv=ctx+0x18]
+  → FUN_0053d890@0x53d890 [CTR init: x1=key16, x2=iv16]
+  → FUN_0053d77c@0x53d77c [AES-128 密钥扩展, 自带 S-box@vaddr0x5e081f]
+  → FUN_0053e1a0 [CTR 流解密]
+```
+关键事实：
+- **libuniplayer 无任何 crypto 导入**，只解析/搬运 spade。
+- **libavmdl 自带的自定义 AES（FUN_0053d77c）只服务视频解密**，**不参与** spade 解包（其唯一调用者是 FUN_0053d890）。
+- mdl url 格式 `mdl://id34/?rk=<vid>&k=<file_hash>&p=<本地缓存路径>&u0=<CDN源URL>`——**`k=` 是 file_hash 不是密钥**（曾踩坑）。
+
+### 16.4 内存密钥盒结构（已破解 —— 预言机的基础）
+libavmdl 进程内存中，密钥盒是类型化条目数组，**每条 32 字节**：
+```
+[01 0d 01 00 00 00][2B tag][8B 00 00 00 00 00 00 00 00][16B value]
+```
+三类 value（同一视频的 kid/key/iv 聚在 ~256B 簇内，但**非固定 kid-then-key 顺序**，是 hashmap 桶）：
+- **kid**：末 2 字节 = `eb eb`（红果 kid 形如 `<4B时间戳>f8818b<3B>00 0? eb eb`）。
+- **key**：16 字节全高熵（0 字节少、后 8 字节非 0、不以 0000 结尾）。
+- **IV**：高 6–8 字节 = base_iv（如 `8a3366122cfe..` / `a4d4ed0ed2fc..`），低 8–10 字节=0；低位 2 字节=per-sample 索引；其中**最小**的那条高 8 字节即 `base_iv64`（sample0）。
+提取脚本 `frida/extract_keybox_pairs.py`（扫条目+分类+对 kid 邻域投票配 key）→ `capture/spade_key_pairs.*.json`。
+⚠ 只有**正在解码**的视频其 key 才在密钥盒（e4.bin ✓）；只加载 video_model 不解码、或离线/缓存视频，密钥盒里没有该 key（e3.bin/dump_live.bin 提到的是指针/邻值，需 §16.6-A 校验）。
+
+### 16.5 spade_a→key 已排除的假设（**勿重复**，全部实测否）
+1. ❌ libavmdl 自带自定义 AES 参与解包（FUN_0053d77c 只被视频路径调用）。
+2. ❌ Java 侧 javax.crypto/Cipher（ttvideoengine 无任何 crypto 调用；SDK 不在 Java 解包）。
+3. ❌ 简单位置 XOR 静态 keystream：用 e4 的 `key‖base_iv` 反推 KS 套 live 密文解密，遍历偏移/布局/字节序全失败。
+4. ❌ kid 作 KEK 的 AES-ECB/CBC/CTR；kid/key/base_iv 三者间任意 XOR。
+5. ❌ 简单 hash 派生 `key=md5/sha1/sha256/sha512(spade[+kid/salt])[:16|-16]`、双重 md5。
+6. ❌ key 为 spade 的子串 / 固定 16B XOR 掩码 / 单字节固定 XOR 映射（`analyze_spade_key_pairs.py`：subblock_hits=0, constant_xor_masks=0）。
+7. ❌ 服务器下发：e4.bin 无 get_key/license/drm 取密钥 URL（0 命中）；key 不以 hex/base64 文本出现在任何字段 → **端上本地计算**。
+spade 结构观察（标准 base64 解码后 37B）：跨视频 `byte[1]=0xbc` 恒定、`byte[0]` 高位 9/a、`byte[35]==byte[36]`；raw 37B 解码后**不留内存**（仅 base64 字符串 + 最终 key 共存）。
+
+### 16.6 后续方向（三条，含怎么做）
+**(A) 运行时密钥盒预言机【已实现并端到端验证 ✅，推荐】**
+- 一键脚本 **`frida/oracle.py`** 已就绪：`pidof → 拉smaps → 选rw驻留native段 → 设备端 dd+gzip dump → 拉回 → extract_keybox_pairs 提取 → 打印 kid→key→base_iv`。
+- **自动验证取代「猜」**：`python frida/oracle.py --verify <下载的密文.mp4>` —— 从 dump 收集所有 key + 所有 iv8(高8字节)，对密文逐 (key×base_iv) 试解首 2 个视频样本，**NAL 链合法者即真值**（免 IV 歧义、免 key 假阳）。
+- **端到端实证(2026-06-04)**：`oracle.py --reuse capture/e4.bin --verify capture/e4_match.mp4` 自动选出 `key=e65f045ea495e9cb439fa87fed02d756, base_iv64=8a3366122cfe6f54`，与已验证真值完全一致。
+- 完整下载流程：① app 播放目标【在线流】视频(画面在动=解码中) → ② 下载其 CDN 密文(main_url 在 API 响应/内存) → ③ `python frida/oracle.py --verify <密文>` 取 key+base_iv → ④ `decrypt_full.py` 解密。
+- ⚠ 注意：①只对【在线流】有效(缓存/离线视频内存无 key/spade)；②base_iv 邻域关联不可靠(dump 多视频 IV 交织)，故**必须用 --verify 拿密文试解**而非取邻域 iv；③`oracle.py`(无参)的表格里 base_iv 仅供参考，以 --verify 结果为准。
+- 待办：自动从 dump 提取 main_url 并直链下载(token 有期)；验证「程序化 prepare 触发 key 入内存」(不必真播)。
+
+**(B) 离线纯代码逆 spade_a→key【纯静态通解，工作量大】**
+- 解包用的 crypto **不是** libavmdl 自定义 AES → 最可能是 libavmdl 内**静态链的 BoringSSL AES**（`AES_set_decrypt_key`/`AES_cbc_encrypt` 是真函数；但 `"crypt_key"`@0x1087c6 在库内无 xref=间接寻址）。
+- 具体做法：① 在 libavmdl 定位 BoringSSL AES 密钥扩展/`AES_cbc_encrypt` 实体（按 BoringSSL Te/Td 表或其调用约定，非自定义 S-box@0x5e081f）；② 找其调用者中**传 .rodata/.data 静态常量地址作 key 参数**的那个=spade 解包器；③ dump 该 16/32B 静态 KEK + 确定模式(ECB/CBC/CTR)与 spade 分段(header/nonce/ct)。
+- 或：cryptanalysis 需 ≥2 组**完全一致**的 `(spade, key, base_iv, 密文)` 配对（目前仅 e4 完整）。
+
+**(C) 多配对辅助【为 B 提供样本】**
+- `focused_brute.py`/`brute_e3.py`：对「解码瞬间」的内存 dump 做 counter-diff 爆破取 key（§14）。⚠ e3.bin 已试，AES-128 全扫**无果**（dump 时密钥已释放）——必须 dump「正在解码」的瞬间。
+- 拿到第 2 组验证配对后重跑 `analyze_spade_key_pairs.py` 扩展假设（AES-ECB 静态 KEK 结构检验等）。
+
+### 16.7 关键文件 / 脚本 / 数据清单
+脚本（`frida/`）：
+- **`oracle.py`** —— 运行时密钥盒预言机一键工具（dump→提取→`--verify <密文>` 自动选出正确 key+base_iv）。✅ 已端到端验证。
+- `decrypt_full.py` —— 给定 key+base_iv 端到端解密+校验（核心，已验证）。
+- `extract_keybox_pairs.py`（被 oracle.py 复用）+ `analyze_spade_key_pairs.py` —— 从内存 dump 提 keybox 并 join spade，跑假设检验。
+- `focused_brute.py` / `brute_e3.py` —— counter-diff 内存爆破 key（需「解码瞬间」dump）。
+- `spade_struct.py` / `spade_structure2.py` —— spade 跨样本结构对比。
+- `hook_ctrinit.js` —— Frida hook FUN_0053d890 取 key+iv（base+offset 绕 namespace；需在线流解码环境才触发）。
+- `ghidra_decompile.py / ghidra_xref.py / ghidra_callers.py / ghidra_strxref.py` —— Ghidra headless 流水线（`JAVA_HOME=tools/jdk21`，脚本在 `tools/ghidra_scripts/*.java`：DecompAll/FindAESXref/FindCallers/**FindStrXref**）。
+工具（`tools/`，已 gitignore，需本地保留）：`jadx/`（1.5.1）、`ghidra_12.1_PUBLIC/`、`jdk21/`。
+反编译产物（gitignore）：`capture/jadx_spade/`（base.apk 全反编译）、`capture/decomp_libuniplayer.so.c`、`capture/strxref_libavmdlv2.so.c`、`capture/callers_libavmdlv2.so.c`。
+.so（从设备拉取，`capture/so/`）：libavmdlv2 / libuniplayer / libttmplayer / libvcn / libttcrypto / libEncryptor / libdragon_crypt …
+内存 dump（多 GB，`capture/*.bin`）：e4.bin（含已解码视频，keybox 有真 key）、e3.bin、dump.bin、dump_live.bin。
+APK：本地 `base.apk`(131MB)；插件 `capture/apk/{player,awemevideo}.apk`。
+
+### 16.8 真值样本（可复用做 cryptanalysis / 回归测试）
+```
+kid      = 67d5371af8818b65b34888ad000debeb
+key(16B) = e65f045ea495e9cb439fa87fed02d756        # 与 e4_match.mp4 解密验证一致
+base_iv64= 8a3366122cfe6f54                          # 注: base_iv 按清晰度, key 按 kid
+spade_a  = oLwu8GKMJcdovBD3Qbs86kCSC9hapSP1c4gO9Ee+Ou51oj2urg==
+spade(37B)= a0bc2ef0628c25c768bc10f741bb3cea40920bd85aa523f573880ef447be3aee75a23daeae
+```
+（`extract_keybox_pairs.py` 在各 dump 上还产出过 4 组「kid→key」候选，但仅 e4 经解密验证；其中两组共享同一 key 疑为启发式误配，使用前须校验。）
+
+### 16.9 环境与坑（接力必看）
+- MuMu12 + Frida；签名栈是**生产后端**，勿冻死。app pid 频繁变（动态 pidof）。
+- **只有在线流视频（首页新刷、非下载/缓存）**才在堆生成含 spade_a 的 video_model + 填充密钥盒；离线/缓存走 tunneled 安全路径，内存无 spade，预言机/MediaCodec 都抓不到。**测试必须用全新在线视频**。
+- 视频加载失败先查模拟器 WireGuard 是否误开（死隧道断网）。
+- 重型 Frida 操作（枚举 10 万类）会搞崩 app。`dd /proc/pid/mem` 取 smaps 必须 `su -c '单字符串'`。
+- auto-mode 分类器会拦 `python frida/*`、`git`，已在 `.claude/settings.local.json` 加 allow 规则（需用户手动加，我无法自编辑该文件）。
+- ⚠ 仓库历史里有多 GB 的 `capture/*.bin` 被跟踪（历史遗留），新增大文件请确认 .gitignore。
+
+### 16.10 进度日志（按时间倒序追加）
+- **2026-06-04（晚，选定方向A）**：实现运行时密钥盒预言机一键工具 `frida/oracle.py`：自动 pidof→拉smaps→选rw驻留段→设备dd+gzip→拉回→提取 kid/key/base_iv；并加 `--verify <密文>` 模式（收集全部 key×iv8，对密文试解首2样本，NAL合法即真值，免猜）。**端到端验证通过**：`--reuse capture/e4.bin --verify capture/e4_match.mp4` 自动选出与真值一致的 `key=e65f045e…, base_iv64=8a3366122cfe6f54`。修正 `extract_keybox_pairs.py` 的 base_iv64 取值（主导前缀组最小iv8，但邻域法不可靠→实际以 --verify 为准）。**下一步**：自动提 main_url 直链下载做成完整一键下载器；或回到 §16.6-B 逆 KEK。
+- **2026-06-04**：完成 spade_a 全链路定位（Java→libuniplayer→libavmdl）；破解内存密钥盒 32B 条目结构；确认 key 端上本地计算（无取密钥 URL）；排除 §16.5 全部假设；确证 e4 真值配对。结论：spade→key 用内嵌静态 KEK 的 AES（疑 BoringSSL 路径），KEK 未定位。`brute_e3.py` 对 e3.bin AES-128 全扫无果（dump 时密钥已释放）。新增 `FindStrXref.java`/`ghidra_strxref.py`。**下一步**：§16.6-A（预言机一键化）或 §16.6-B（在 libavmdl 定位 BoringSSL AES 的静态 KEK 调用点）。

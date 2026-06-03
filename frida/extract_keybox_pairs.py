@@ -131,15 +131,22 @@ def build_report(dump_path: Path, lookahead_bytes: int, iv_window: int) -> dict:
                     "offsets": [hex(x) for x in key_offsets[(kid, key_hex)]],
                 }
             )
+        ivc = iv_candidates.get(kid, Counter())
+        # base_iv64 = 主导6字节前缀组里数值最小的 iv8 (=最低样本索引; 窗口含sample0时即真base_iv)
+        base_iv64 = None
+        if ivc:
+            pref = Counter(iv[:12] for iv in ivc).most_common(1)[0][0]  # 6字节=12 hex
+            base_iv64 = min(iv for iv in ivc if iv[:12] == pref)
         joined.append(
             {
                 "kid": kid,
                 "spade_a": spade_values,
                 "spade_bytes": [decoded_spade_hex(x) for x in spade_values],
                 "keys": keys,
+                "base_iv64": base_iv64,
                 "iv8_candidates": [
                     {"iv8": iv, "votes": count}
-                    for iv, count in iv_candidates.get(kid, Counter()).most_common(16)
+                    for iv, count in ivc.most_common(16)
                 ],
             }
         )
