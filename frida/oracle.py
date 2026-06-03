@@ -56,15 +56,28 @@ def _nal_ok(pt, sz):
         p += 4 + ln
     return p == sz
 def verify_key_iv(ct_path, keys, iv8s):
+    """对密文逐 (key×base_iv) 试解, NAL自证选真值。
+    先用首块(16B)的首NAL长度快筛, 再全样本校验。keys 应传"全部key候选"(让密文定真伪)。"""
     from Crypto.Cipher import AES
     from Crypto.Util import Counter
     d, sizes, offs = parse_video_samples(ct_path)
-    print(f"  密文视频样本={len(sizes)}; 试 {len(keys)} key × {len(iv8s)} base_iv ...")
+    if not sizes:
+        return None, None
+    co0, sz0 = offs[0], sizes[0]
+    blk0 = d[co0:co0+16]
+    print(f"  密文视频样本={len(sizes)}; 试 {len(keys)} key × {len(iv8s)} base_iv (首块快筛) ...", flush=True)
     for kh in keys:
         K = bytes.fromhex(kh)
         if len(K) != 16: continue
+        ec = {}  # 缓存 AES 对象无意义(每次IV不同), 直接算
         for ivh in iv8s:
             biv = int(ivh, 16)
+            # 快筛: 解首16字节, 首NAL长度须 0<L<sample_size
+            pt0 = AES.new(K, AES.MODE_CTR, counter=Counter.new(128, initial_value=(biv << 64))).decrypt(blk0)
+            L = struct.unpack(">I", pt0[:4])[0]
+            if not (0 < L < sz0):
+                continue
+            # 全验证首2样本 NAL 链
             ok = 0
             for idx in range(min(2, len(sizes))):
                 co, sz = offs[idx], sizes[idx]; iv = ((biv+idx) << 64)
@@ -74,6 +87,22 @@ def verify_key_iv(ct_path, keys, iv8s):
             if ok >= 2:
                 return kh, ivh
     return None, None
+
+
+def all_key_candidates(dump_path):
+    """dump 里全部 distinct "key"-分类的16字节值(高熵, 让密文定真伪, 避免投票假阳)。"""
+    import mmap
+    from extract_keybox_pairs import iter_keybox_entries
+    keys = []
+    seen = set()
+    with open(dump_path, "rb") as f:
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        for e in iter_keybox_entries(mm):
+            if e["kind"] == "key":
+                h = e["value"].hex()
+                if h not in seen:
+                    seen.add(h); keys.append(h)
+    return keys
 
 ADB = r"D:\Program Files\Netease\MuMu Player 12\shell\adb.exe"
 DEV = "127.0.0.1:16384"

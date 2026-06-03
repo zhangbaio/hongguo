@@ -105,33 +105,33 @@ def main():
             print("✗ app 未运行。先启动红果并播放在线视频。"); sys.exit(1)
         dump = oracle.do_dump(pid)
 
-    # 2) 提取 video 记录 + keybox key
-    print("[*] 提取 video_model(vid/main_url/kid) + 密钥盒(kid->key) ...", flush=True)
+    # 2) 提取 video 记录 + 定位"正在解码"的 kid(其簇内有 key 条目) + 全部 key 候选
+    print("[*] 提取 video_model(vid/main_url/kid) + 定位正在解码的视频 ...", flush=True)
     recs = extract_video_records(dump)
     rep = build_report(Path(dump), lookahead_bytes=256, iv_window=512)
-    kid2key = {it["kid"]: it["keys"][0]["key"] for it in rep["joined"] if it["keys"]}
+    # "kid 簇内有 key 条目" = 正在解码的视频(可靠); key 真值不靠投票, 交给密文 verify
+    playing_kids = [it["kid"] for it in rep["joined"] if it["keys"]]
 
-    # 只保留"有 key(=正在解码)"且有 main_url 的候选
     cands = []
-    for kid, key in kid2key.items():
+    for kid in playing_kids:
         if kid in recs and recs[kid]["urls"]:
-            cands.append((kid, key, recs[kid]["vid"], recs[kid]["urls"]))
-    print(f"[*] 可下载候选(有key+main_url): {len(cands)}")
-    for kid, key, vid, urls in cands:
-        print(f"    vid={vid} kid={kid[:16]}.. key={key[:16]}.. urls={len(urls)}")
+            cands.append((kid, recs[kid]["vid"], recs[kid]["urls"]))
+    print(f"[*] 正在解码且有 main_url 的视频: {len(cands)}")
+    for kid, vid, urls in cands:
+        print(f"    vid={vid} kid={kid[:16]}.. urls={len(urls)}")
     if args.list or not cands:
         if not cands:
-            print("  ⚠ 无候选。确认: 正在【在线流】播放且解码中; main_url 与 key 都需在内存。")
+            print("  [!] 无候选。确认: 正在【在线流】播放且解码中(画面在动); main_url 与 key 都需在内存。")
         return
 
-    # 3) 选目标
+    # 3) 选目标 + 收集全部 key 候选(让密文定真伪, 避免投票假阳)
     if args.vid:
-        cands = [c for c in cands if c[2] == args.vid]
+        cands = [c for c in cands if c[1] == args.vid]
         if not cands:
-            print(f"✗ dump 里没有 vid={args.vid}"); sys.exit(1)
-    target = cands[0]
-    kid, key, vid, urls = target
-    print(f"\n[*] 目标 vid={vid} kid={kid} key={key}")
+            print(f"[X] dump 里没有正在解码的 vid={args.vid}"); sys.exit(1)
+    kid, vid, urls = cands[0]
+    key_cands = oracle.all_key_candidates(dump)
+    print(f"\n[*] 目标 vid={vid} kid={kid}; key候选={len(key_cands)} (由密文试解定真伪)")
 
     ivs = all_iv8(dump)
     os.makedirs("capture/dl", exist_ok=True)
@@ -144,10 +144,9 @@ def main():
             download(url, ct)
         except Exception as e:
             print(f"  下载失败({e}); 试下一个 url"); continue
-        print(f"  [*] 试解 key × {len(ivs)} base_iv ...", flush=True)
-        kh, ivh = oracle.verify_key_iv(ct, [key], ivs)
+        kh, ivh = oracle.verify_key_iv(ct, key_cands, ivs)
         if not kh:
-            print("  该 url 没找到匹配 base_iv(可能清晰度的iv不在内存); 试下一个 url"); continue
+            print("  该清晰度没找到匹配 key/base_iv(其iv可能不在内存); 试下一个 url"); continue
         print(f"  [OK] key={kh} base_iv64={ivh}")
         ok, tot = decrypt_full(ct, kh, ivh, out)
         if ok == tot:
