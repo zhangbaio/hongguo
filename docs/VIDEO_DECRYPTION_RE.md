@@ -755,10 +755,12 @@ spade 结构观察（标准 base64 解码后 37B）：跨视频 `byte[1]=0xbc` �
 - ⚠ 注意：①只对【在线流】有效(缓存/离线视频内存无 key/spade)；②base_iv 邻域关联不可靠(dump 多视频 IV 交织)，故**必须用 --verify 拿密文试解**而非取邻域 iv；③`oracle.py`(无参)的表格里 base_iv 仅供参考，以 --verify 结果为准。
 - 待办：自动从 dump 提取 main_url 并直链下载(token 有期)；验证「程序化 prepare 触发 key 入内存」(不必真播)。
 
-**(B) 离线纯代码逆 spade_a→key【纯静态通解，工作量大】**
-- 解包用的 crypto **不是** libavmdl 自定义 AES → 最可能是 libavmdl 内**静态链的 BoringSSL AES**（`AES_set_decrypt_key`/`AES_cbc_encrypt` 是真函数；但 `"crypt_key"`@0x1087c6 在库内无 xref=间接寻址）。
-- 具体做法：① 在 libavmdl 定位 BoringSSL AES 密钥扩展/`AES_cbc_encrypt` 实体（按 BoringSSL Te/Td 表或其调用约定，非自定义 S-box@0x5e081f）；② 找其调用者中**传 .rodata/.data 静态常量地址作 key 参数**的那个=spade 解包器；③ dump 该 16/32B 静态 KEK + 确定模式(ECB/CBC/CTR)与 spade 分段(header/nonce/ct)。
-- 或：cryptanalysis 需 ≥2 组**完全一致**的 `(spade, key, base_iv, 密文)` 配对（目前仅 e4 完整）。
+**(B) 离线纯代码逆 spade_a→key【纯静态通解，工作量大；2026-06-04 多轮排查后重大修正】**
+- **静态密码分析已穷尽且全否**：对 e4 验证对，暴力遍历二进制每个16/32字节窗口当 KEK，测 AES-ECB(enc/dec)、CBC(相邻块链)、CTR(nonce=spade[:16]/0/kid)，覆盖 libavmdl/libttcrypto/libuniplayer/libEncryptor/libdragon_crypt → **全部无命中**。结论：**KEK 不是二进制里的明文常量**（被混淆/运行时组装/白盒）。也排除 hash 派生(md5/sha[+kid/salt])。
+- **libavmdl 的 AES 是红鲱鱼（动态证实）**：libavmdl 同时有正向S-box@0x5e081f(CTR用)和**逆S-box@0x5e092a**，后者对应 AES-decrypt 链：`FUN_0053dc84`(AES-128-ECB-dec单块,逆S-box)←`FUN_0053e31c`(CBC-dec)←分发器`FUN_00501c8c`(method=2; key@ctx+8, iv@ctx+0x18)。**曾以为这是 spade 解包**。但 Frida hook 这些函数(及 CTR init `FUN_0053d890`、分发器)，**播放+12次切集全程零触发**(而 hook libc `open` 正常触发 25次/15s，证明 Frida 工作)。
+- **⇒ 重大修正**：**spade→key 解包不在 libavmdl**；libavmdl 的 AES 在播放/prepare 期都不被调用，它只**持有/存储**密钥盒里已解好的 key；**真正解包在上游 Java 或 JNI native**，算出 key 后经 AVMDL API 塞进 libavmdl 密钥盒；播放解码走 MediaCodec 安全路径。
+- **继续 B 的正确方向**：① 反编译 **base.apk 全部 26 个 dex**(目前只反编译了 classes6/16)，找消费 `spade_a`/`getSpadea()`→产出 key 的类(可能在 com.dragon.read app 层而非 ttvideoengine SDK)；② 或 hook **把 key 写入 libavmdl 密钥盒的那个 native setter**(AVMDLDataLoader.setStringValue / JNI)，捕获 key+backtrace 定位上游 Java 解包器；③ 或在 prepare 瞬间(attach 在先、打开**从未加载过**的全新剧)catch 上游 unwrap——注意普通切集/自动下一集是预加载/缓存,不触发新鲜 unwrap。
+- cryptanalysis 需 ≥2 组**完全一致**的 `(spade, key, base_iv, 密文)` 配对（目前仅 e4 完整；downloader 的 verify 可为任意在播视频产出验证过的真值对，用于扩样本）。
 
 **(C) 多配对辅助【为 B 提供样本】**
 - `focused_brute.py`/`brute_e3.py`：对「解码瞬间」的内存 dump 做 counter-diff 爆破取 key（§14）。⚠ e3.bin 已试，AES-128 全扫**无果**（dump 时密钥已释放）——必须 dump「正在解码」的瞬间。
@@ -799,6 +801,7 @@ spade(37B)= a0bc2ef0628c25c768bc10f741bb3cea40920bd85aa523f573880ef447be3aee75a2
 - ⚠ 仓库历史里有多 GB 的 `capture/*.bin` 被跟踪（历史遗留），新增大文件请确认 .gitignore。
 
 ### 16.10 进度日志（按时间倒序追加）
+- **2026-06-04（深夜，离线逆向重大修正）**：穷尽静态 KEK 暴力(全库×ECB/CBC/CTR×16/32B×nonce变体)→无明文 KEK(混淆/白盒)。Ghidra 经逆S-box@0x5e092a 定位到 libavmdl 的 AES-decrypt 链(dc84←e31c-CBC←分发器501c8c)，曾判定为 spade 解包；但 Frida 实测(hook_unwrap.js: 分发器/CTR init/CBC/AES-dec 块)播放+12次自动切集**全程零触发**，而 libc open 对照触发正常→**证实 libavmdl AES 与 spade 解包/视频解码无关，仅持有密钥盒**。**结论修正**：解包在上游 Java/JNI，libavmdl 只存 key。新增 hook_unwrap.js/run_keyiv.py/FindInvSbox.java。**下一步**：反编译全部 dex 找 Java 解包器，或 hook 密钥盒 setter 反查上游。
 - **2026-06-04（晚，🎉 全自动下载器实时打通）**：`frida/downloader.py` 实时端到端成功——播放在线短剧→一键 dump→下载5清晰度密文→正在解码的(8448KB)密文试解出 `key=8dd3292893cb77f16dd101c82a31b125, base_iv=9992303cb5408974`→解密 5244/5244 合法→ffprobe HEVC1080p/174.8s/抽帧成功。**关键修复**：弃用"投票选 key"(假阳 `77214d4b…` 在多 kid 邻域反复出现 x4 骗过熵过滤)，改为"收集全部 distinct key 分类值(本 dump 仅5个)交密文 verify 定真伪"+首块快筛(5key×40279iv 秒级)；"正在解码视频"靠 kid 簇内有 key 条目识别。坑续：mMainUrl 多为释放截断 std::string，取无\x00+长+闭引号的干净 URL。音频另议。
 - **2026-06-04（晚，全自动下载器初版）**：实现 `frida/downloader.py` 框架（dump→抽 vid/main_url/kid→keybox key→下载→verify→decrypt）。三段单测通过；首次实时跑暴露"投票选 key"假阳问题(见上条修复)。坑：内存里 mMainUrl 很多是被释放/截断的 std::string，需取干净 URL。
 - **2026-06-04（晚，选定方向A）**：实现运行时密钥盒预言机一键工具 `frida/oracle.py`：自动 pidof→拉smaps→选rw驻留段→设备dd+gzip→拉回→提取 kid/key/base_iv；并加 `--verify <密文>` 模式（收集全部 key×iv8，对密文试解首2样本，NAL合法即真值，免猜）。**端到端验证通过**：`--reuse capture/e4.bin --verify capture/e4_match.mp4` 自动选出与真值一致的 `key=e65f045e…, base_iv64=8a3366122cfe6f54`。修正 `extract_keybox_pairs.py` 的 base_iv64 取值（主导前缀组最小iv8，但邻域法不可靠→实际以 --verify 为准）。**下一步**：自动提 main_url 直链下载做成完整一键下载器；或回到 §16.6-B 逆 KEK。
