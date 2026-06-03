@@ -34,6 +34,8 @@ def on_message(msg, data):
         elif t == "DECBLK":
             cbcs.append(p)
             print(f"  [DECBLK] ct={p.get('ct')} sched0(≈KEK)={p.get('sched0')}")
+        elif t == "CTR_RUN":
+            print(f"  [CTR_RUN] len={p.get('len')} data0={p.get('data0')}")
         elif t == "DECBLK_OUT":
             print(f"  [DECBLK_OUT] pt={p.get('pt')}")
         elif t in ("hooked", "base", "ready", "hookfail", "tick"):

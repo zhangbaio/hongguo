@@ -35,6 +35,10 @@ if(base){
     this.blk=a[0]; this.cin=hx(a[0],16);
     send({t:'DECBLK', ct:this.cin, sched0:hx(a[1],16), sched_full:hx(a[1],176)});
   },onLeave:function(){ send({t:'DECBLK_OUT', pt:hx(this.blk,16)}); }});}catch(e){send({t:'hookfail',f:'decblk',e:''+e});}
-  send({t:'ready',msg:'hook on(分发器+CTR+CBC); 切换到新一集触发解包'});
+  // 逐块 CTR 流解密 FUN_0053e1a0(ctx,data,len): 视频解码热路径; 若触发=libavmdl确在解密
+  try{Interceptor.attach(base.add(0x53e1a0),{onEnter:function(a){
+    if(!seen['ctr_run']){seen['ctr_run']=1; send({t:'CTR_RUN', len:a[2].toInt32(), data0:hx(a[1],16)});}
+  }});}catch(e){send({t:'hookfail',f:'ctrrun',e:''+e});}
+  send({t:'ready',msg:'hook on(分发器+CTRinit+CTRrun+CBC+AESdec); 打开全新视频'});
   setInterval(function(){send({t:'tick'});},15000);
 }
