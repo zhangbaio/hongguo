@@ -563,3 +563,18 @@ hook_ttcrypto/inspect_encryptorutil.js + enc_exports.py。
 
 **当前最优仍是**: 已验证的离线提密钥(raw key内存暴力+counter-diff, §14) 或 keystream+counter-diff限定密钥盒区(§15.6);
 "主动调用纯代码"需先定位视频AES在哪个lib的哪个函数(libavmdl/dragoncore, 或换法hook EVP_DecryptInit_ex)。
+
+### 15.8 决定性: 视频AES在libavmdl内部(自带S-box), 无导出函数可hook/调用(2026-06-01)
+静态扫描(scan_avmdl_crypto.py)决定性结论:
+- **libavmdlv2.so 自带 AES S-box(@0x4e081f)+InvSbox** → 内部有**自己的软件AES实现**。
+- 它虽 import 了 libttcrypto 的 AES_set_encrypt_key/set_decrypt_key/AES_cbc_encrypt, 但 hook 这些(及AES_encrypt)
+  播放时**全不触发** → 视频AES-CTR走的是**libavmdl内部AES(自带S-box)**, 不是libttcrypto导出函数。
+- libavmdlv2 导出的非系统函数只有 registerIoCtrl* (无任何crypt/aes导出); libEncryptor 有InvSbox(自带AES解密表)
+  但其Java可调ttEncrypt是gzip+网络加密(§15.7)。
+- **结论**: 没有"可按名hook/主动调用"的视频解密导出函数。纯代码主动调用路**封闭**。要纯代码只能:
+  ①Ghidra逆 libavmdlv2 内部AES(找S-box@0x4e081f的xref→AES/CTR函数→hook取key+counter); 或 ②逆spade_a。
+- **可hook技巧已备**: base+offset 绕 linker namespace 隔离有效(libttcrypto验证); 找到内部AES函数偏移后可同法hook。
+
+**全局最终结论**: 解密已攻破(§14, 离线全速解出可播视频)。产品化取key+iv三条路:
+①已验证: 内存raw-key暴力+counter-diff(§14); ②设计待跑: keystream+counter-diff限定密钥盒区(§15.6, ~10-20s/视频);
+③纯代码: Ghidra逆libavmdl内部AES或spade_a(§15.8/15.5)。"主动调用导出函数"已排除(§15.7/15.8)。
