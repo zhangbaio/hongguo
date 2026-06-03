@@ -578,3 +578,25 @@ hook_ttcrypto/inspect_encryptorutil.js + enc_exports.py。
 **全局最终结论**: 解密已攻破(§14, 离线全速解出可播视频)。产品化取key+iv三条路:
 ①已验证: 内存raw-key暴力+counter-diff(§14); ②设计待跑: keystream+counter-diff限定密钥盒区(§15.6, ~10-20s/视频);
 ③纯代码: Ghidra逆libavmdl内部AES或spade_a(§15.8/15.5)。"主动调用导出函数"已排除(§15.7/15.8)。
+
+### 15.9 🔑 Ghidra逆向: 精确定位视频解密函数(libavmdlv2内部AES) (2026-06-01)
+装好 Ghidra 12.1 + JDK21(tools/), headless反编译流水线可用(frida/ghidra_decompile.py + ghidra_xref.py +
+ghidra_callers.py; 脚本 tools/ghidra_scripts/*.java)。
+- libEncryptor 反编译(71函数): JNI只有ttEncrypt, 核心是3个6476字节OLLVM平坦化函数, 是gzip+网络加密, **非视频**(印证§15.7)。
+- **libavmdlv2.so 内部AES = 视频解密**, S-box@vaddr 0x5e081f(文件偏移0x4e081f), Rcon@0x5e091f。15个函数引用S-box。
+- **精确函数地图(libavmdlv2 vaddr偏移, 运行时=base+偏移)**:
+  - **FUN_0053d77c(out, key)** = AES-128密钥扩展(44字=11轮密钥). **param_2(x1)=原始16字节内容密钥**。
+  - **FUN_0053d890(ctx, key, iv)** = AES-CTR初始化: 调0053d77c扩展key + 把IV存到ctx+0xb0/0xb8.
+    **x1=内容密钥(16B), x2=IV(16B)** —— 一个hook同时拿key+iv, 最理想hook点。
+  - FUN_0053e1a0(ctx, data, len) = CTR流解密(XOR keystream@ctx+0xb0, 每块调0053d8b8);
+    FUN_0053d8b8 = AES块(keystream生成)。
+- **Frida hook已就绪**(frida/hook_ctrinit.js, base+offset绕namespace, 验证地址有效可attach):
+  hook FUN_0053d890 读 x1=key/x2=iv。**但实测75s+多轮都0触发** → 模拟器播放窗口内**无新流AES解密发生**
+  (播的是缓存/离线tunneled, 不走libavmdl在线AES-CTR)。需真正的**全新在线streaming**解码才会调用。
+
+### 15.10 现状与两条收尾路(2026-06-01)
+- **活体hook取key+iv**(hook_ctrinit.js, FUN_0053d890): 技术就绪, 仅差"模拟器稳定地对全新在线视频做AES-CTR解密"
+  的环境(反复实测无法稳定触发; 缓存/离线播放不走此路径)。环境配合时一击即得key+iv。
+- **纯静态逆spade_a**(env无关): 追 FUN_0053d890 的 param_2(内容密钥) 上游调用链 → spade_a(37B)→16B 解包算法。
+  深度OLLVM, 多轮静态分析。ghidra_callers.py 可逐层找调用者反编译。
+- 已验证可用的离线解密(§14, raw-key内存暴力+counter-diff)仍是最稳妥的产品化基础。
