@@ -1,0 +1,65 @@
+package com.dragon.read.kmprpc.reader.saas.model;
+
+import com.bytedance.covode.number.Covode;
+import kotlin.Lazy;
+import kotlin.LazyKt__LazyJVMKt;
+import kotlin.LazyThreadSafetyMode;
+import kotlin.jvm.functions.Function0;
+import kotlin.jvm.internal.DefaultConstructorMarker;
+import kotlinx.serialization.KSerializer;
+import kotlinx.serialization.Serializable;
+
+@Serializable(with = s5.class)
+/* loaded from: D:\code\hongguo\capture\classes6.dex */
+public enum SelectorDisplayStyle {
+    Default(0),
+    ranklist_v1(1),
+    ranklist_v2(2),
+    ranklist_v3(3);
+
+    private static final Lazy<KSerializer<Object>> $cachedSerializer$delegate;
+    public static final a Companion;
+    private final int value;
+
+    public final int getValue() {
+        return this.value;
+    }
+
+    public static final class a {
+        static {
+            Covode.recordClassIndex(610755);
+        }
+
+        private a() {
+        }
+
+        public /* synthetic */ a(DefaultConstructorMarker defaultConstructorMarker) {
+            this();
+        }
+
+        public final KSerializer<SelectorDisplayStyle> serializer() {
+            return a();
+        }
+
+        private final /* synthetic */ KSerializer a() {
+            return (KSerializer) SelectorDisplayStyle.$cachedSerializer$delegate.getValue();
+        }
+    }
+
+    static {
+        Lazy<KSerializer<Object>> lazy;
+        Covode.recordClassIndex(610754);
+        Companion = new a(null);
+        lazy = LazyKt__LazyJVMKt.lazy(LazyThreadSafetyMode.PUBLICATION, (Function0) new Function0<KSerializer<Object>>() { // from class: com.dragon.read.kmprpc.reader.saas.model.SelectorDisplayStyle$Companion$1
+            @Override // kotlin.jvm.functions.Function0
+            public final KSerializer<Object> invoke() {
+                return s5.b;
+            }
+        });
+        $cachedSerializer$delegate = lazy;
+    }
+
+    SelectorDisplayStyle(int i) {
+        this.value = i;
+    }
+}

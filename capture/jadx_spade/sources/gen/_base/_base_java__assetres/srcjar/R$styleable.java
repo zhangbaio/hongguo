@@ -1,0 +1,94 @@
+package gen._base._base_java__assetres.srcjar;
+
+import android.R;
+import com.bytedance.covode.number.Covode;
+
+/* loaded from: D:\code\hongguo\capture\classes16.dex */
+public class R$styleable {
+    public static int[] Capability;
+    public static int Capability_queryPatterns;
+    public static int Capability_shortcutMatchRequired;
+    public static int[] ColorStateListItem;
+    public static int ColorStateListItem_alpha;
+    public static int ColorStateListItem_android_alpha;
+    public static int ColorStateListItem_android_color;
+    public static int ColorStateListItem_android_lStar;
+    public static int ColorStateListItem_lStar;
+    public static int[] FontFamily;
+    public static int[] FontFamilyFont;
+    public static int FontFamilyFont_android_font;
+    public static int FontFamilyFont_android_fontStyle;
+    public static int FontFamilyFont_android_fontVariationSettings;
+    public static int FontFamilyFont_android_fontWeight;
+    public static int FontFamilyFont_android_ttcIndex;
+    public static int FontFamilyFont_font;
+    public static int FontFamilyFont_fontStyle;
+    public static int FontFamilyFont_fontVariationSettings;
+    public static int FontFamilyFont_fontWeight;
+    public static int FontFamilyFont_ttcIndex;
+    public static int FontFamily_fontProviderAuthority;
+    public static int FontFamily_fontProviderCerts;
+    public static int FontFamily_fontProviderFetchStrategy;
+    public static int FontFamily_fontProviderFetchTimeout;
+    public static int FontFamily_fontProviderPackage;
+    public static int FontFamily_fontProviderQuery;
+    public static int FontFamily_fontProviderSystemFontFamily;
+    public static int[] GradientColor;
+    public static int[] GradientColorItem;
+    public static int GradientColorItem_android_color;
+    public static int GradientColorItem_android_offset;
+    public static int GradientColor_android_centerColor;
+    public static int GradientColor_android_centerX;
+    public static int GradientColor_android_centerY;
+    public static int GradientColor_android_endColor;
+    public static int GradientColor_android_endX;
+    public static int GradientColor_android_endY;
+    public static int GradientColor_android_gradientRadius;
+    public static int GradientColor_android_startColor;
+    public static int GradientColor_android_startX;
+    public static int GradientColor_android_startY;
+    public static int GradientColor_android_tileMode;
+    public static int GradientColor_android_type;
+
+    static {
+        Covode.recordClassIndex(656195);
+        Capability_shortcutMatchRequired = 1;
+        ColorStateListItem_android_alpha = 1;
+        ColorStateListItem_android_color = 2;
+        ColorStateListItem_android_lStar = 3;
+        ColorStateListItem_lStar = 4;
+        FontFamilyFont_android_fontStyle = 1;
+        FontFamilyFont_android_fontVariationSettings = 2;
+        FontFamilyFont_android_fontWeight = 3;
+        FontFamilyFont_android_ttcIndex = 4;
+        FontFamilyFont_font = 5;
+        FontFamilyFont_fontStyle = 6;
+        FontFamilyFont_fontVariationSettings = 7;
+        FontFamilyFont_fontWeight = 8;
+        FontFamilyFont_ttcIndex = 9;
+        FontFamily_fontProviderCerts = 1;
+        FontFamily_fontProviderFetchStrategy = 2;
+        FontFamily_fontProviderFetchTimeout = 3;
+        FontFamily_fontProviderPackage = 4;
+        FontFamily_fontProviderQuery = 5;
+        FontFamily_fontProviderSystemFontFamily = 6;
+        GradientColorItem_android_offset = 1;
+        GradientColor_android_centerX = 1;
+        GradientColor_android_centerY = 2;
+        GradientColor_android_endColor = 3;
+        GradientColor_android_endX = 4;
+        GradientColor_android_endY = 5;
+        GradientColor_android_gradientRadius = 6;
+        GradientColor_android_startColor = 7;
+        GradientColor_android_startX = 8;
+        GradientColor_android_startY = 9;
+        GradientColor_android_tileMode = 10;
+        GradientColor_android_type = 11;
+        Capability = new int[]{0, 0};
+        ColorStateListItem = new int[]{0, R.attr.alpha, R.attr.color, R.attr.lStar, 0};
+        FontFamily = new int[]{0, 0, 0, 0, 0, 0, 0};
+        FontFamilyFont = new int[]{R.attr.font, R.attr.fontStyle, R.attr.fontVariationSettings, R.attr.fontWeight, R.attr.ttcIndex, 0, 0, 0, 0, 0};
+        GradientColor = new int[]{R.attr.centerColor, R.attr.centerX, R.attr.centerY, R.attr.endColor, R.attr.endX, R.attr.endY, R.attr.gradientRadius, R.attr.startColor, R.attr.startX, R.attr.startY, R.attr.tileMode, R.attr.type};
+        GradientColorItem = new int[]{R.attr.color, R.attr.offset};
+    }
+}

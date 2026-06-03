@@ -614,3 +614,62 @@ ghidra_callers.py; 脚本 tools/ghidra_scripts/*.java)。
   填充密钥盒(kid->key byte[])的类/方法; 它可能纯Java实现, 或调某native(libEncryptor的非ttEncrypt函数?)。
   ctx+8 的key由Java经 AVMDLDataLoader 的 native API(addDataSource/setStringValue等)传入native。
 - 务实对比: 逆spade_a跨Java↔native+OLLVM, 是多日工程; 而 hook FUN_0053d890 取key+iv(§15.9)只差解码环境。
+
+### 15.12 keybox 离线自动提取脚本(2026-06-03)
+新增脚本 `frida/extract_keybox_pairs.py`，把之前手工 hexdump 的 keybox 规则固化为可复用流程：
+
+- 从内存 dump 自动抽 `mKid -> mSpadea`，兼容 `\u003d` 转义。
+- 扫描 32B keybox 条目：`01 0d 01 00 00 00 | tag2 | 0000000000000000 | value16`。
+- 分类规则：`value.endswith(ebeb)` 为二进制 kid；`value[8:16]==0` 为 IV；高熵 16B 值为内容 key 候选。
+- 对 kid 后 256B 内的 key 候选投票，并输出 `capture/spade_key_pairs.auto.json`。
+
+在 `capture/e4.bin` 上复现出干净真值对：
+
+```text
+kid   = 67d5371af8818b65b34888ad000debeb
+spade = oLwu8GKMJcdovBD3Qbs86kCSC9hapSP1c4gO9Ee+Ou51oj2urg==
+key   = e65f045ea495e9cb439fa87fed02d756
+```
+
+运行结果：
+
+```text
+entry_counts={'kid': 13583, 'iv': 13581, 'key': 2, 'other': 6}
+mspade_kids=25 keybox_kids=1
+kid=67d5371af8818b65b34888ad000debeb key=e65f045ea495e9cb439fa87fed02d756 votes=2 spade_count=1
+```
+
+意义：现在已经不只是单组手工配对，而是能从 dump 自动 join 出 `spade_a + content key`。下一步若要继续纯静态破解 `spade_a -> key`，这条真值对就是确定样本；若走工程化预言机，则此脚本可作为离线验证器和 keybox 结构回归测试。
+
+继续批量跑现有 dump：
+
+```text
+python frida/extract_keybox_pairs.py capture/dump.bin      -o capture/spade_key_pairs.dump.json
+python frida/extract_keybox_pairs.py capture/e3.bin        -o capture/spade_key_pairs.e3.json
+python frida/extract_keybox_pairs.py capture/eg.bin        -o capture/spade_key_pairs.eg.json
+python frida/extract_keybox_pairs.py capture/sync_dump.bin -o capture/spade_key_pairs.sync_dump.json
+python frida/extract_keybox_pairs.py capture/dump_live.bin -o capture/spade_key_pairs.dump_live.json
+python frida/analyze_spade_key_pairs.py
+```
+
+得到 5 组带 `spade_a + key` 的真值样本：
+
+```text
+67d5371af8818b65b34888ad000debeb -> e65f045ea495e9cb439fa87fed02d756
+68216156f8818b3795bfd2050003ebeb -> 5ad820e74bc5bda386bc3c41cf0d099f
+6a158fe8f8818b1740e098760002ebeb -> 5ad820e74bc5bda386bc3c41cf0d099f
+69c75860f8818b5bd43a21e40002ebeb -> 77214d4b196a87cd520045fd20a51d67
+6a1593a8f8818ba14ea950b50002ebeb -> b6509a236622f23ce3fc4c2f33164577
+```
+
+`frida/analyze_spade_key_pairs.py` 的低成本假设检验结果：
+
+```text
+pairs=5
+subblock_hits=0
+constant_xor_masks=0
+byte_xor_candidates=0
+same_key_groups=1
+```
+
+结论：`spade_a -> key` 不是直接子串、固定 16B XOR 掩码、或单字节固定 XOR 映射。两条不同 `kid/spade_a` 解出同一个 key，说明同一内容 key 可被不同包装 blob/track 引用；后续纯静态应继续定位 Java/native unwrap 函数，而不是再试简单线性规则。

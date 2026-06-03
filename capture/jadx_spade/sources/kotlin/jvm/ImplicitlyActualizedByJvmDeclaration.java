@@ -1,0 +1,18 @@
+package kotlin.jvm;
+
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+import kotlin.DeprecatedSinceKotlin;
+import kotlin.annotation.AnnotationRetention;
+import kotlin.annotation.AnnotationTarget;
+
+@Target({ElementType.TYPE})
+@kotlin.annotation.Target(allowedTargets = {AnnotationTarget.CLASS})
+@Retention(RetentionPolicy.CLASS)
+@kotlin.annotation.Retention(AnnotationRetention.BINARY)
+@DeprecatedSinceKotlin(errorSince = "2.1")
+/* loaded from: D:\code\hongguo\capture\classes16.dex */
+public @interface ImplicitlyActualizedByJvmDeclaration {
+}

@@ -1,0 +1,49 @@
+package com.dragon.read.origin.rpc.model;
+
+import com.bytedance.covode.number.Covode;
+
+/* loaded from: D:\code\hongguo\capture\classes6.dex */
+public enum PlotProgressStatus {
+    ScriptNotStarted(1),
+    ChapterPlaying(2),
+    ScriptSuccess(3),
+    ChapterSuccess(4),
+    ChapterFailed(6),
+    ChapterNotStarted(7);
+
+    private final int value;
+
+    public int getValue() {
+        return this.value;
+    }
+
+    static {
+        Covode.recordClassIndex(613307);
+    }
+
+    public static PlotProgressStatus findByValue(int i) {
+        if (i != 1) {
+            if (i != 2) {
+                if (i != 3) {
+                    if (i != 4) {
+                        if (i != 6) {
+                            if (i != 7) {
+                                return null;
+                            }
+                            return ChapterNotStarted;
+                        }
+                        return ChapterFailed;
+                    }
+                    return ChapterSuccess;
+                }
+                return ScriptSuccess;
+            }
+            return ChapterPlaying;
+        }
+        return ScriptNotStarted;
+    }
+
+    PlotProgressStatus(int i) {
+        this.value = i;
+    }
+}

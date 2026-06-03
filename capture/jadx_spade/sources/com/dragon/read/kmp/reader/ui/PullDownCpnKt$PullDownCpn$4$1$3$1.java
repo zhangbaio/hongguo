@@ -1,0 +1,60 @@
+package com.dragon.read.kmp.reader.ui;
+
+import androidx.compose.animation.core.Animatable;
+import kotlin.ResultKt;
+import kotlin.Unit;
+import kotlin.coroutines.Continuation;
+import kotlin.coroutines.intrinsics.IntrinsicsKt__IntrinsicsKt;
+import kotlin.coroutines.jvm.internal.Boxing;
+import kotlin.coroutines.jvm.internal.DebugMetadata;
+import kotlin.coroutines.jvm.internal.SuspendLambda;
+import kotlin.jvm.functions.Function2;
+import kotlinx.coroutines.CoroutineScope;
+
+@DebugMetadata(c = "com.dragon.read.kmp.reader.ui.PullDownCpnKt$PullDownCpn$4$1$3$1", f = "PullDownCpn.kt", i = {}, l = {91}, m = "invokeSuspend", n = {}, s = {})
+/* loaded from: D:\code\hongguo\capture\classes6.dex */
+final class PullDownCpnKt$PullDownCpn$4$1$3$1 extends SuspendLambda implements Function2<CoroutineScope, Continuation<? super Unit>, Object> {
+    final /* synthetic */ float $newOffset;
+    final /* synthetic */ Animatable<Float, androidx.compose.animation.core.m> $offsetY;
+    int label;
+
+    /* JADX WARN: 'super' call moved to the top of the method (can break code semantics) */
+    PullDownCpnKt$PullDownCpn$4$1$3$1(Animatable<Float, androidx.compose.animation.core.m> animatable, float f, Continuation<? super PullDownCpnKt$PullDownCpn$4$1$3$1> continuation) {
+        super(2, continuation);
+        this.$offsetY = animatable;
+        this.$newOffset = f;
+    }
+
+    @Override // kotlin.coroutines.jvm.internal.BaseContinuationImpl
+    public final Continuation<Unit> create(Object obj, Continuation<?> continuation) {
+        return new PullDownCpnKt$PullDownCpn$4$1$3$1(this.$offsetY, this.$newOffset, continuation);
+    }
+
+    @Override // kotlin.jvm.functions.Function2
+    public final Object invoke(CoroutineScope coroutineScope, Continuation<? super Unit> continuation) {
+        return ((PullDownCpnKt$PullDownCpn$4$1$3$1) create(coroutineScope, continuation)).invokeSuspend(Unit.INSTANCE);
+    }
+
+    @Override // kotlin.coroutines.jvm.internal.BaseContinuationImpl
+    public final Object invokeSuspend(Object obj) {
+        Object coroutine_suspended;
+        coroutine_suspended = IntrinsicsKt__IntrinsicsKt.getCOROUTINE_SUSPENDED();
+        int i = this.label;
+        if (i != 0) {
+            if (i == 1) {
+                ResultKt.throwOnFailure(obj);
+            } else {
+                throw new IllegalStateException("call to 'resume' before 'invoke' with coroutine");
+            }
+        } else {
+            ResultKt.throwOnFailure(obj);
+            Animatable<Float, androidx.compose.animation.core.m> animatable = this.$offsetY;
+            Float boxFloat = Boxing.boxFloat(this.$newOffset);
+            this.label = 1;
+            if (animatable.r(boxFloat, this) == coroutine_suspended) {
+                return coroutine_suspended;
+            }
+        }
+        return Unit.INSTANCE;
+    }
+}
