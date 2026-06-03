@@ -747,6 +747,9 @@ spade 结构观察（标准 base64 解码后 37B）：跨视频 `byte[1]=0xbc` �
 - **自动验证取代「猜」**：`python frida/oracle.py --verify <下载的密文.mp4>` —— 从 dump 收集所有 key + 所有 iv8(高8字节)，对密文逐 (key×base_iv) 试解首 2 个视频样本，**NAL 链合法者即真值**（免 IV 歧义、免 key 假阳）。
 - **端到端实证(2026-06-04)**：`oracle.py --reuse capture/e4.bin --verify capture/e4_match.mp4` 自动选出 `key=e65f045ea495e9cb439fa87fed02d756, base_iv64=8a3366122cfe6f54`，与已验证真值完全一致。
 - 完整下载流程：① app 播放目标【在线流】视频(画面在动=解码中) → ② 下载其 CDN 密文(main_url 在 API 响应/内存) → ③ `python frida/oracle.py --verify <密文>` 取 key+base_iv → ④ `decrypt_full.py` 解密。
+- **全自动下载器 `frida/downloader.py`（已串成一键，三段逻辑均验证）**：一次 dump 同时抽 `mVideoId(vid)/mMainUrl(CDN密文直链,~1KB长,排除被释放截断的)/mKid` + keybox `kid→key` + 全部 `iv8`，对"有 key=正在解码"的视频逐 main_url 下载→`verify_key_iv`(key×iv8 试解首2样本,NAL自证)→`decrypt_full`→输出 mp4。
+  - 用法：`python frida/downloader.py`(自动下正在解码的) / `--vid <vid>`(多个时指定) / `--list`(只列候选) / `--reuse <dump>`(调试)。
+  - 已验证：提取(e4.bin→vid+kid+key+5个url ✓)、key/base_iv 选择(oracle --verify ✓)、全解密(decrypt_full 5575/5575 ✓)。**待实时实证**：下载需未过期 main_url(=新鲜播放时的 dump)。
 - ⚠ 注意：①只对【在线流】有效(缓存/离线视频内存无 key/spade)；②base_iv 邻域关联不可靠(dump 多视频 IV 交织)，故**必须用 --verify 拿密文试解**而非取邻域 iv；③`oracle.py`(无参)的表格里 base_iv 仅供参考，以 --verify 结果为准。
 - 待办：自动从 dump 提取 main_url 并直链下载(token 有期)；验证「程序化 prepare 触发 key 入内存」(不必真播)。
 
@@ -761,6 +764,7 @@ spade 结构观察（标准 base64 解码后 37B）：跨视频 `byte[1]=0xbc` �
 
 ### 16.7 关键文件 / 脚本 / 数据清单
 脚本（`frida/`）：
+- **`downloader.py`** —— 全自动下载器（输入 vid/自动识别正在播放 → dump→提取 vid/main_url/kid/key/iv→下载 CDN 密文→试解验证→输出解密 mp4）。三段逻辑已验证，待实时实证。
 - **`oracle.py`** —— 运行时密钥盒预言机一键工具（dump→提取→`--verify <密文>` 自动选出正确 key+base_iv）。✅ 已端到端验证。
 - `decrypt_full.py` —— 给定 key+base_iv 端到端解密+校验（核心，已验证）。
 - `extract_keybox_pairs.py`（被 oracle.py 复用）+ `analyze_spade_key_pairs.py` —— 从内存 dump 提 keybox 并 join spade，跑假设检验。
@@ -793,5 +797,6 @@ spade(37B)= a0bc2ef0628c25c768bc10f741bb3cea40920bd85aa523f573880ef447be3aee75a2
 - ⚠ 仓库历史里有多 GB 的 `capture/*.bin` 被跟踪（历史遗留），新增大文件请确认 .gitignore。
 
 ### 16.10 进度日志（按时间倒序追加）
+- **2026-06-04（晚，全自动下载器）**：实现 `frida/downloader.py`——「输入 vid（或自动识别正在解码）→ 输出解密 mp4」。一次 dump 抽 `vid/main_url/kid` + keybox `kid→key` + 全 `iv8`，下载 CDN 密文，`verify_key_iv` 试解选出 key+base_iv，`decrypt_full` 全解。三段已验证（提取 e4.bin→vid+kid+key+5url ✓；key/iv 选择 ✓；解密 5575/5575 ✓）。坑：内存里 mMainUrl 很多是被释放/截断的 std::string（`https://v96-sz-\x00…`），需取「无 \x00、~1KB 长、到闭引号」的干净 URL。**待实时实证**：用新鲜播放（main_url 未过期）的 dump 跑通下载。
 - **2026-06-04（晚，选定方向A）**：实现运行时密钥盒预言机一键工具 `frida/oracle.py`：自动 pidof→拉smaps→选rw驻留段→设备dd+gzip→拉回→提取 kid/key/base_iv；并加 `--verify <密文>` 模式（收集全部 key×iv8，对密文试解首2样本，NAL合法即真值，免猜）。**端到端验证通过**：`--reuse capture/e4.bin --verify capture/e4_match.mp4` 自动选出与真值一致的 `key=e65f045e…, base_iv64=8a3366122cfe6f54`。修正 `extract_keybox_pairs.py` 的 base_iv64 取值（主导前缀组最小iv8，但邻域法不可靠→实际以 --verify 为准）。**下一步**：自动提 main_url 直链下载做成完整一键下载器；或回到 §16.6-B 逆 KEK。
 - **2026-06-04**：完成 spade_a 全链路定位（Java→libuniplayer→libavmdl）；破解内存密钥盒 32B 条目结构；确认 key 端上本地计算（无取密钥 URL）；排除 §16.5 全部假设；确证 e4 真值配对。结论：spade→key 用内嵌静态 KEK 的 AES（疑 BoringSSL 路径），KEK 未定位。`brute_e3.py` 对 e3.bin AES-128 全扫无果（dump 时密钥已释放）。新增 `FindStrXref.java`/`ghidra_strxref.py`。**下一步**：§16.6-A（预言机一键化）或 §16.6-B（在 libavmdl 定位 BoringSSL AES 的静态 KEK 调用点）。
