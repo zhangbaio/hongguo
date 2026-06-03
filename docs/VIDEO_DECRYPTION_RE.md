@@ -547,3 +547,19 @@ IV是CENC标准(per-sample base+序号), 已端到端解出整段可播视频。
 - **可靠快速方案(未实施, 推荐)**: keystream(MediaCodec抓几秒明文+序列匹配得2连续块) + counter-diff
   **只扫kid附近密钥盒区(几KB,秒级)** → 免IV/无假阳/无组合爆炸, 预计~10-20s/视频。
 - 结论: 核心解密(§14)已100%攻破; 预言机=已定位密钥盒+提取法待工程化(走keystream+counter-diff限定区, 或逆spade_a)。
+
+### 15.7 主动调用红果方法 探索(2026-06-01) — 定位视频crypto在哪(排除法)
+目标: 找app自己的Java可调解密方法直接调用(纯代码,无需内存/播放)。脚本 find_decrypt_methods/find_ttencrypt/
+hook_ttcrypto/inspect_encryptorutil.js + enc_exports.py。
+- **libttcrypto.so = BoringSSL**(导出AES_set_encrypt_key/AES_ctr128_encrypt/EVP_*等标准AES)。但hook这些
+  (base+offset绕namespace, 5/6成功)播放视频时**全不触发** → BoringSSL是给TLS/网络用的, **视频不走它**。
+  (注: 之前§3"hook AES 0命中"是hook了系统libcrypto, 库都错了)。
+- **libEncryptor.so 的 `EncryptorUtil.ttEncrypt(byte[],int)`**(`com.bytedance.frameworks.encryptor.EncryptorUtil`,
+  native `([BI)[B`): hook到实际调用, 但输入是 **gzip数据(1f8b08..)** → 是**通用网络/日志数据加密**, **非视频**。
+- 结论: 视频内容密钥的AES-CTR**不在**libttcrypto标准AES, 也不在EncryptorUtil; 在 AVMDL(libavmdlv2)/libdragoncore
+  内部 或 硬件AES路径。**线索**: `EVP_DecryptInit_ex` Frida报"unable to intercept"没hook上, 视频若走它则被漏掉(待换hook法重试)。
+- ⚠ 重型 Java.enumerateLoadedClasses + 逐类Java.use 会**搞崩app**(已踩坑), 类名过滤要轻量。
+- 可调方法发现法: 直接从.so的.rodata扫JNI签名(`([B...)[B`/`Ljava`)+方法名, 比运行时枚举快且不崩(enc_exports.py)。
+
+**当前最优仍是**: 已验证的离线提密钥(raw key内存暴力+counter-diff, §14) 或 keystream+counter-diff限定密钥盒区(§15.6);
+"主动调用纯代码"需先定位视频AES在哪个lib的哪个函数(libavmdl/dragoncore, 或换法hook EVP_DecryptInit_ex)。
