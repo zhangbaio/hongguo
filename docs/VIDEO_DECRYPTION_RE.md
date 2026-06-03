@@ -11,7 +11,7 @@
 > §9 CENC 定性；§13 内存 aeskeyfind 证伪→改用原始密钥 counter-diff 爆破；§14 离线攻破；§15 预言机+Ghidra 定位解密函数+spade_a 链路；§16 汇总接力。
 > ⚠ **风险**：MuMu+frida 签名栈是线上生产签名后端，提密钥的内存操作用独立 root shell 读 `/proc/mem`（不碰 frida）以免冻死签名。详见 §16.9。
 >
-> 最后更新：2026-06-01
+> 最后更新：2026-06-04（§16.10 顶部追加 A0 复验：oracle.py/downloader.py 当前环境实时端到端再次验证通过 + 性能实测 + 弯路纠正）
 
 ---
 
@@ -801,6 +801,22 @@ spade(37B)= a0bc2ef0628c25c768bc10f741bb3cea40920bd85aa523f573880ef447be3aee75a2
 - ⚠ 仓库历史里有多 GB 的 `capture/*.bin` 被跟踪（历史遗留），新增大文件请确认 .gitignore。
 
 ### 16.10 进度日志（按时间倒序追加）
+- **2026-06-04（A0：现成工具在当前环境复验通过 + 性能实测 + 弯路纠正）**：
+  - **目的**：接手后先验证 §14/§16 的解密工具链当前是否仍可用，再决定产品化。
+  - **① 工具完好性（环境无关）**：`python frida/oracle.py --reuse capture/e4.bin --verify capture/e4_match.mp4`
+    → 自动选出 `key=e65f045ea495e9cb439fa87fed02d756, base_iv64=8a3366122cfe6f54`，与 §16.8 真值**逐字节一致**。
+    （注：报告表里 `base_iv=a4d4ed0e..` 是邻域启发式误值，以 `--verify` 结果为准——符合 §16.6-A 既述。）
+  - **② 当前环境实时端到端**：`python frida/downloader.py`（全自动）再次跑通——播放在线短剧→实时 dump（417MB 驻留/56s）
+    →自动识别正在解码 `vid=v02ebeg10000d8g31ovog65ilud8fa4g`(kid=`6a2030e3f8818b2af9a87a890002ebeb`)→下 5 清晰度密文逐一密文自证
+    →命中 **key=`ecfe21991e52d78ce771ead1c2bd5341`, base_iv64=`135130ab6c057dc9`**→解密 **1580/1580 样本 NAL 合法**
+    →ffprobe `HEVC 1080×1920 / 52.7s`、抽帧=真实剧集画面。**⇒ 解密工具链当前环境完好可用**。
+  - **③ 性能实测（产品化估时依据）**：单视频 ≈ **5–8 min**，瓶颈是 dump——dd `conv=noerror,sync` 把 417MB 驻留
+    **零填充膨胀到 ~12GB**，扫描慢。**最大优化杠杆 = 只 dump 真正驻留页**（预计单视频降到 ~1–3 min）。可多设备并行线性扩展。
+  - **④ 方案 A（产品化解密预言机）工期评估**：A.1 程序化触发指定 vid 播放(deeplink/UI 自动化, **工期决定项+主风险**) 0.5–2 天
+    + A.2 封装预言机接 hglocal 0.5–1 天 + A.3 健壮性 0.5–1 天 = **共 ~2–4 天**；硬约束：**仅在线流有效**（半实时，需 app 真播一下目标视频）。
+  - **⚠ 弯路纠正（接手者勿重蹈）**：本轮一度重走 **aeskeyfind 找 AES 轮密钥扩展(176B)** —— 这是 **§13 已实测证伪**的死路
+    （字节用硬件/自定义 AES，标准轮密钥扩展**不在内存**，只有原始 16B key 在）。扫到 17 个合法轮密钥候选但对密文全不匹配＝必然结果。
+    **正解＝§16.4 的密钥盒 32B 条目提取**（`[01 0d 01 00 00 00][2B tag][8B 0][16B value]`，按 kid 尾 `ebeb`/高熵 key/低位零 iv 分类），已封装在 `oracle.py`/`downloader.py`。
 - **2026-06-04（深夜4，JNI 抓到 spade 但 Houdini 挡住回溯）**：hook JNI `GetStringUTFChars`(JNIEnv vtable idx169, hook_jnistr.js)匹配 base64 spade 串+Thread.backtrace → **成功捕获多个 spade 经 JNI 传入 native**(证实解包确在 native)；但 **backtrace 全部指向 `libhoudini.so+0x3561a8`**。⇒ **MuMu 是 x86 模拟器, 用 Houdini 把 ARM 翻译成 x86 执行, Frida 的 native 调用栈被 Houdini 翻译层挡住, 无法回溯到真正的 ARM 调用者(=解包函数)**。这是**环境硬墙**: 在 Houdini 下定位 native 调用者不可行。**破法**: ①换**真 ARM 设备/纯 ARM 模拟器**(无 Houdini)→backtrace 可用→可直接定位 native 解包入口; ②纯静态 RE 混淆 native(无回溯辅助, 很难)。**有用副产物**: hook_jnistr.js 能可靠批量抓 spade(可配合 keybox 取 key 攒大量验证对做密码分析)。
 - **2026-06-04（深夜3，Java crypto 也排除）**：hook 密钥盒 setter 反查上游——先在 **Java 层 hook `javax.crypto.Cipher.init/doFinal`**(hook_cipher.js, 最可靠), 清缓存+自动播放全新视频 → **0 个 crypto 事件**。⇒ **解包不在 Java javax.crypto**。结合前述(libavmdl AES 全零触发、无明文 KEK), **spade→key 解包在混淆 native 代码且不用标准 AES 原语**(无法按名/Java层 hook)。libavmdl 模块 `Process.findModuleByName` 返回 null(namespace 隔离), 枚举导出需用 enumerateRanges 取 base 手动解析。**剩余离线避头(均高成本/不确定)**: ①catch 密钥盒写入(硬件 watchpoint, Frida JS 不易); ②hook JNI 边界(GetStringUTFChars 匹配 spade 串)在新鲜 prepare 时反查 native 入口——受"新鲜 prepare 时机"制约(切集/自动下一集是预加载, 普通播放不触发新鲜 unwrap); ③深逆混淆 native(可能白盒)。**务实结论再确认**: 纯离线(API→key)是大工程且可能白盒不可解; **运行时密钥盒下载器 `downloader.py` 已验证可用, 是这类 App 离线下载的标准做法**。
 - **2026-06-04（深夜2，libavmdl 彻底排除-定论）**：补 hook 逐块 CTR 解密 `FUN_0053e1a0`(视频解码热路径) + 清空 .mdl 缓存强制全新下载，自动点击/下滑播放全新视频 → **CTR_RUN 仍零触发**(连同 init/分发器/CBC/AES-dec)。**定论：libavmdl 完全不参与视频解密，只持有密钥盒**；视频解密走 **MediaCodec 安全路径**(key 交硬件/安全解码器)，spade→key 解包在**上游 Java/JNI**。⇒ 我在 libavmdl AES 上的逆向方向被彻底排除。**真正可行的离线方向**收敛为：①反编译全部 dex 找 Java 解包(但 classes16 的 Cipher/SecretKeySpec 经查是腾讯/银联/小米推送 SDK 的，非视频; Java 标准 crypto 不是解包器→解包很可能是 JNI native); ②hook 把 key 写入 libavmdl 密钥盒的 JNI setter, 反查上游解包 native 库(疑 libttmplayer/libvcn/一个未分析的 ByteDance security 库)。**务实结论**: 纯离线(API→key 无 app)仍未攻破; 已验证可用的是运行时密钥盒下载器(§16.6-A, 需 app 加载视频)。
