@@ -15,10 +15,11 @@
   python offline_dl.py series <series_id> [范围 1-5/3/all] [-c 并发] [-r 重试轮] [-q 清晰度]
   python offline_dl.py resume <series_id> [-c 并发] [-r 重试轮] [-q 清晰度]   # 只补未完成/失败集
   python offline_dl.py vid <vid> [输出文件名] [-q 清晰度]
-  python offline_dl.py batch <id1> <id2> ... [-c 并发] [-r 重试轮] [-q 清晰度]
+  python offline_dl.py batch <id1> <id2> ... [-c 并发] [-r 重试轮] [-q 清晰度]   # 多剧并行(全局并发上限)
   python offline_dl.py status <series_id>                          # 看进度
+  # -c: 全局并发上限(跨剧共享, 总同时下载+解密任务数 ≤ -c, 默认4); -r: 失败重试轮数(默认2)。
   # -q: best(默认)/worst/1080p/720p/540p/480p/360p(或纯数字); 不存在则取<=请求的最高档。
-  # 并发默认4; 重试默认2轮。⚠同一集不同清晰度文件名相同会跳过, 换清晰度需先删旧文件或用不同 vid 名。
+  # ⚠同一集不同清晰度文件名相同会跳过, 换清晰度需先删旧文件或用不同 vid 名。
 """
 import sys, os, json, re, threading, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -163,12 +164,19 @@ def dl_vid(vid, name=None, retries=2, quiet=False, quality="best"):
     return None
 
 
-# ---------- 整剧(续传+重试) ----------
-def dl_series(series_id, rng="all", concurrency=4, retry_rounds=2, quality="best"):
+# ---------- 整剧/多剧(全局并发池 + 续传 + 重试) ----------
+class SeriesCtx:
+    """一部剧的下载上下文: 状态/标题/集列表/清晰度 + 各自的状态锁。"""
+    def __init__(self, sid, title, state, eps, quality):
+        self.sid = sid; self.title = title; self.state = state; self.eps = eps
+        self.quality = quality; self.lock = threading.Lock()
+
+
+def _prepare(series_id, rng, quality):
+    """取剧集+范围过滤+加载状态, 返回 (ctx, pending待下集, skipped已完成数)。"""
     meta, eps = H.get_episodes(series_id)
     title = H.sanitize(meta["title"])
     st = _load_state(series_id); st["title"] = title; st["series_id"] = str(series_id); st["quality"] = quality
-    # 范围过滤
     if rng != "all":
         m = re.match(r"(\d+)-(\d+)", rng)
         if m:
@@ -176,55 +184,88 @@ def dl_series(series_id, rng="all", concurrency=4, retry_rounds=2, quality="best
             eps = [e for e in eps if lo <= (e["index"] or 0) <= hi]
         elif rng.isdigit():
             eps = [e for e in eps if (e["index"] or 0) == int(rng)]
-    # 续传: 跳过已完成
+    ctx = SeriesCtx(series_id, title, st, eps, quality)
     pending = [e for e in eps if not _is_done(st, e["index"])]
-    skipped = len(eps) - len(pending)
-    log(f"《{title}》共 {meta.get('episode_cnt','?')} 集 | {meta['status']} | 目标 {len(eps)} 集 | "
-        f"已完成跳过 {skipped} | 待下 {len(pending)} | 清晰度 {quality} | 并发 {concurrency}")
-    if not pending:
-        log(f"《{title}》全部已完成 ✓ -> {OUT}"); return {"ok": skipped, "fail": 0, "total": len(eps)}
+    log(f"《{title}》共 {meta.get('episode_cnt','?')} 集 | {meta['status']} | 目标 {len(eps)} | "
+        f"跳过已完成 {len(eps)-len(pending)} | 待下 {len(pending)} | 清晰度 {quality}")
+    return ctx, pending, len(eps) - len(pending)
 
-    dlock = threading.Lock(); done = {"ok": 0, "fail": 0}
-    def work(e):
-        idx = e["index"]
-        path = dl_vid(e["vid"], f"{title}_第{(idx or 0):03d}集", retries=2, quality=quality)
-        with dlock:
-            ent = st["episodes"].setdefault(str(idx), {"vid": e["vid"], "attempts": 0})
-            ent["vid"] = e["vid"]; ent["attempts"] = ent.get("attempts", 0) + 1; ent["ts"] = int(time.time())
-            if path:
-                ent["status"] = "done"; ent["file"] = path; ent.pop("error", None); done["ok"] += 1
-            else:
-                ent["status"] = "failed"; ent["error"] = getattr(dl_vid, "last_error", "?"); done["fail"] += 1
-            _save_state(series_id, st)  # 增量保存: 每集完成即落盘(中断不丢)
-            n = done["ok"] + done["fail"]
-            log(f"    进度 {n}/{len(pending)}  (成功{done['ok']} 失败{done['fail']})")
 
-    t0 = time.time()
-    todo = pending
-    rnd = 0
+def _episode_task(ctx, e):
+    """下载+解密一集并更新该剧状态(线程安全, 增量落盘)。返回 bool 成功。"""
+    idx = e["index"]
+    path = dl_vid(e["vid"], f"{ctx.title}_第{(idx or 0):03d}集", retries=2, quality=ctx.quality)
+    with ctx.lock:
+        ent = ctx.state["episodes"].setdefault(str(idx), {"vid": e["vid"], "attempts": 0})
+        ent["vid"] = e["vid"]; ent["attempts"] = ent.get("attempts", 0) + 1; ent["ts"] = int(time.time())
+        if path:
+            ent["status"] = "done"; ent["file"] = path; ent.pop("error", None)
+        else:
+            ent["status"] = "failed"; ent["error"] = getattr(dl_vid, "last_error", "?")
+        _save_state(ctx.sid, ctx.state)
+    return bool(path)
+
+
+def run_jobs(jobs, cap, retry_rounds):
+    """全局并发池跑所有 (ctx, episode) 任务; cap=全局并发上限(跨剧共享); 失败自动多轮重试。"""
+    if not jobs:
+        return
+    cnt = {"ok": 0, "fail": 0}; clock = threading.Lock()
+    t0 = time.time(); todo = jobs; rnd = 0
     while todo:
-        with ThreadPoolExecutor(max_workers=concurrency) as ex:
-            list(as_completed([ex.submit(work, e) for e in todo]))
-        # 本轮后收集仍失败的集, 自动重试
-        failed = [e for e in todo if not _is_done(st, e["index"])]
+        total = len(todo); cnt["ok"] = cnt["fail"] = 0
+        def work(ctx, e):
+            ok = _episode_task(ctx, e)
+            with clock:
+                cnt["ok" if ok else "fail"] += 1
+                n = cnt["ok"] + cnt["fail"]
+                log(f"    进度 {n}/{total}  (成功{cnt['ok']} 失败{cnt['fail']})")
+        with ThreadPoolExecutor(max_workers=cap) as ex:
+            list(as_completed([ex.submit(work, ctx, e) for ctx, e in todo]))
+        failed = [(ctx, e) for ctx, e in todo if not _is_done(ctx.state, e["index"])]
         if not failed or rnd >= retry_rounds:
-            todo = failed if False else []  # 退出
             break
         rnd += 1
-        log(f"\n[重试 {rnd}/{retry_rounds}] 失败 {len(failed)} 集: {sorted(e['index'] for e in failed)}, 退避后重试...")
-        time.sleep(3 * rnd)
-        with dlock: done["ok"] = done["ok"]; done["fail"] = 0  # 重置失败计数(重试轮)
-        todo = failed
+        log(f"\n[全局重试 {rnd}/{retry_rounds}] 失败 {len(failed)} 集, 退避后重试...")
+        time.sleep(3 * rnd); todo = failed
+    log(f"  (本批 {len(jobs)} 任务用时 {int(time.time()-t0)}s)")
 
-    final_fail = sorted(int(i) for i, e in st["episodes"].items()
-                        if e.get("status") != "done" and any((ep["index"] or 0) == int(i) for ep in eps))
-    okn = sum(1 for e in eps if _is_done(st, e["index"]))
-    dt = int(time.time() - t0)
-    log(f"\n《{title}》完成 {okn}/{len(eps)} 集" + (f", 仍失败: {final_fail}" if final_fail else " ✓")
-        + f" ({dt}s) -> {OUT}")
-    if final_fail:
-        log(f"    可重跑补齐: python offline_dl.py resume {series_id}")
-    return {"ok": okn, "fail": len(final_fail), "total": len(eps)}
+
+def _summary(ctx):
+    okn = sum(1 for e in ctx.eps if _is_done(ctx.state, e["index"]))
+    fail = sorted(int(i) for i, e in ctx.state["episodes"].items()
+                  if e.get("status") != "done" and any((ep["index"] or 0) == int(i) for ep in ctx.eps))
+    log(f"《{ctx.title}》完成 {okn}/{len(ctx.eps)} 集" + (f", 仍失败: {fail}" if fail else " ✓"))
+    if fail:
+        log(f"    可重跑补齐: python offline_dl.py resume {ctx.sid}")
+    return {"ok": okn, "fail": len(fail), "total": len(ctx.eps)}
+
+
+def dl_series(series_id, rng="all", concurrency=4, retry_rounds=2, quality="best"):
+    ctx, pending, _ = _prepare(series_id, rng, quality)
+    if not pending:
+        log(f"《{ctx.title}》全部已完成 ✓ -> {OUT}"); return _summary(ctx)
+    log(f"  全局并发 {concurrency}")
+    run_jobs([(ctx, e) for e in pending], concurrency, retry_rounds)
+    return _summary(ctx)
+
+
+def dl_batch(series_ids, concurrency=4, retry_rounds=2, quality="best"):
+    """多剧并行: 所有剧的待下集汇入同一全局池(cap=concurrency, 跨剧共享)。"""
+    ctxs, jobs = [], []
+    for sid in series_ids:
+        try:
+            ctx, pending, _ = _prepare(sid, "all", quality)
+            ctxs.append(ctx)
+            jobs += [(ctx, e) for e in pending]
+        except Exception as ex:
+            log(f"[X] 剧 {sid} 准备失败: {ex}")
+    log(f"\n=== 多剧并行: {len(ctxs)} 部剧, 共 {len(jobs)} 集待下, 全局并发上限 {concurrency} ===")
+    run_jobs(jobs, concurrency, retry_rounds)
+    tot = {"ok": 0, "all": 0}
+    for ctx in ctxs:
+        d = _summary(ctx); tot["ok"] += d["ok"]; tot["all"] += d["total"]
+    log(f"\n=== 批量完成: {tot['ok']}/{tot['all']} 集, {len(ctxs)} 部剧 -> {OUT} ===")
 
 
 def show_status(series_id):
@@ -274,11 +315,7 @@ def main():
     elif cmd == "vid":
         dl_vid(rest[0], rest[1] if len(rest) > 1 else None, quality=q)
     elif cmd == "batch":
-        tot = {"ok": 0, "all": 0}
-        for sid in rest:
-            d = dl_series(sid, "all", concurrency=conc, retry_rounds=rr, quality=q)
-            tot["ok"] += d["ok"]; tot["all"] += d["total"]
-        log(f"\n=== 批量完成: {tot['ok']}/{tot['all']} 集, {len(rest)} 部剧 ===")
+        dl_batch(rest, concurrency=conc, retry_rounds=rr, quality=q)  # 跨剧并行, conc=全局并发上限
     else:
         print(__doc__)
 
