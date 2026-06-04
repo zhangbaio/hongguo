@@ -102,6 +102,20 @@ python frida/unwrap_spade.py <spade_a_base64> # 输出 content key(32 hex)
 
 ---
 
+## 对外服务（`server.py`）
+
+FastAPI 服务，`/stream` 端点**服务端纯离线解密后**串流可播 mp4（首次下载+解密并缓存到 `downloads/.stream_cache/`，之后秒回；支持 HTTP Range 拖动）。
+
+```bash
+python server.py            # 或 uvicorn server:app --host 0.0.0.0 --port 8000
+# 取流(可播, 非密文):
+#   /stream?series_id=<id>&ep=1&api_key=<key>
+#   /stream?vid=<vid>&quality=1080p&api_key=<key>
+# <video> 标签无法带请求头, 用 ?api_key= 传密钥
+```
+- `/play` 返回每集的 `encrypted_url`(CDN 密文直链) + `stream_url`(服务端解密的可播端点)。
+- 数据接口强制 `api_key`（`X-API-Key` 头或 `?api_key=`）；`/admin` 用 `ADMIN_TOKEN` 管理密钥。
+
 ## 清晰度与编码（重要）
 
 | 清晰度 | 编码 | 播放 |

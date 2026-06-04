@@ -9,15 +9,67 @@
   GET /search?q=剧名
   GET /rank?board=recommend|hot|new&limit=30
   GET /episodes?series_id=xxx
-  GET /play?series_id=xxx&ep=1            取单集直链
-  GET /play?series_id=xxx&ep=1-10         取多集直链
-  GET /stream?series_id=xxx&ep=1          服务器代理串流(客户端直接播放/下载)
+  GET /play?series_id=xxx&ep=1            取剧集信息(encrypted_url密文直链 + stream_url可播)
+  GET /stream?series_id=xxx&ep=1          ★服务端【纯离线解密】后串流, 客户端拿到可播mp4
+  GET /stream?vid=xxx&quality=1080p       也可直接按 vid + 清晰度; 支持 Range 拖动; <video>用?api_key=
 """
-import re, os, io, time, threading
+import re, os, io, time, threading, sys
 from fastapi import FastAPI, HTTPException, Query, Depends, Request
-from fastapi.responses import StreamingResponse, JSONResponse, Response
+from fastapi.responses import StreamingResponse, JSONResponse, Response, FileResponse
 import requests, urllib3
 import hongguo as H
+
+# 离线解密(纯算法, 无app): spade_a → content key → AES-128-CTR 解密
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "frida"))
+import offline_decrypt as OD
+import offline_dl as ODL
+
+STREAM_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads", ".stream_cache")
+_dec_locks = {}; _dec_guard = threading.Lock()
+def _dec_lock(key):
+    with _dec_guard:
+        return _dec_locks.setdefault(key, threading.Lock())
+
+def _vm_track(vid, quality="best"):
+    """取该集指定清晰度的 (main_url, spade_a, encrypt, definition, size)。"""
+    vm = ODL._video_model(vid)
+    if not vm:
+        return None
+    tr, defn, _ = ODL._pick_track(vm, quality)
+    if not tr:
+        return None
+    enc = tr.get("encrypt_info") or {}
+    meta = tr.get("video_meta") or {}
+    return {"url": tr.get("main_url"), "spade_a": enc.get("spade_a"),
+            "encrypt": bool(enc.get("encrypt")),
+            "definition": meta.get("definition") or defn, "size": meta.get("size", 0)}
+
+def _ensure_decrypted(vid, quality="best"):
+    """下载 CDN 密文 + 纯离线解密, 返回缓存的明文 mp4 路径(已缓存则直接返回)。"""
+    os.makedirs(STREAM_CACHE, exist_ok=True)
+    safe_q = re.sub(r"[^\w]", "", str(quality)) or "best"
+    out = os.path.join(STREAM_CACHE, f"{vid}_{safe_q}.mp4")
+    if os.path.exists(out) and os.path.getsize(out) > 0:
+        return out
+    with _dec_lock(f"{vid}_{safe_q}"):                  # 同集并发请求只解一次
+        if os.path.exists(out) and os.path.getsize(out) > 0:
+            return out
+        t = _vm_track(vid, quality)
+        if not t or not t["url"]:
+            raise HTTPException(404, "无直链/video_model")
+        if not t["encrypt"]:
+            H.download_file(t["url"], out)
+            return out
+        ct = out + ".enc"
+        H.download_file(t["url"], ct)
+        r = OD.offline_decrypt(t["spade_a"], ct, out)
+        try:
+            os.remove(ct)
+        except OSError:
+            pass
+        if not (r and os.path.exists(out) and os.path.getsize(out) > 0):
+            raise HTTPException(500, "解密失败(spade 异常或 ver2 视频?)")
+        return out
 
 urllib3.disable_warnings()
 app = FastAPI(title="红果短剧 API", version="1.0")
@@ -105,7 +157,7 @@ def index():
         "/latest?genre=short_play|comic_series|ai_series&only_today=true",
         "/episodes?series_id=", "/play?series_id=&ep=1-10",
         "/download?series_id=&ep=1-10", "/download/status?task_id=",
-        "/stream?series_id=&ep=1", "/stats"]}
+        "/stream?series_id=&ep=1 (解密可播)", "/stream?vid=&quality=1080p", "/stats"]}
 
 
 @app.get("/stats")
@@ -254,10 +306,13 @@ def api_play(series_id: str, ep: str = "all"):
         for e in sel:
             info = urls.get(e["vid"], {})
             out.append({"index": e["index"], "vid": e["vid"], "title": e["title"],
-                        "duration": e["duration"], "url": info.get("url"),
-                        "backup": info.get("backup"), "size": info.get("size"),
-                        "definition": info.get("definition")})
-        return {"series_id": series_id, "title": meta["title"], "episodes": out}
+                        "duration": e["duration"],
+                        # url 是 CDN 密文直链(CENC加密, 直接播放是花屏); 要可播用 stream_url(服务端已解密)
+                        "encrypted_url": info.get("url"), "backup": info.get("backup"),
+                        "size": info.get("size"), "definition": info.get("definition"),
+                        "stream_url": f"/stream?vid={e['vid']}"})
+        return {"series_id": series_id, "title": meta["title"],
+                "note": "encrypted_url 为CENC密文直链; 可播放用 stream_url(服务端纯离线解密)", "episodes": out}
     except Exception as e:
         raise HTTPException(500, f"play失败: {e}")
 
@@ -294,27 +349,29 @@ def api_video_url(vid: str):
 
 
 @app.get("/stream")
-def api_stream(series_id: str, ep: str = "1"):
-    """服务器代理串流单集(客户端不便直连CDN时用)。支持边下边传。"""
+def api_stream(series_id: str = None, ep: str = "1", vid: str = None, quality: str = "best"):
+    """服务器代理串流单集 —— 已做【纯离线解密】, 客户端拿到的是可播 mp4(非密文)。
+    用法: /stream?series_id=xxx&ep=1  或  /stream?vid=xxx  [&quality=1080p&api_key=...]
+    首次会下载+解密并缓存(downloads/.stream_cache), 之后秒回; FileResponse 支持 Range 拖动。
+    注: <video> 标签无法带请求头, 用 ?api_key= 传密钥。"""
     try:
-        meta, eps = H.get_episodes(series_id)
-        idx = int(ep) if ep.isdigit() else 1
-        target = next((e for e in eps if (e["index"] or 0) == idx), None)
-        if not target:
-            raise HTTPException(404, "集号不存在")
-        urls = H.get_video_urls([target["vid"]])
-        info = urls.get(target["vid"])
-        if not info or not info["url"]:
-            raise HTTPException(404, "无直链")
-        upstream = requests.get(info["url"], stream=True, verify=False, timeout=60)
+        fname = None
+        if not vid:
+            if not series_id:
+                raise HTTPException(400, "需 series_id+ep 或 vid")
+            meta, eps = H.get_episodes(series_id)
+            idx = int(ep) if str(ep).isdigit() else 1
+            target = next((e for e in eps if (e["index"] or 0) == idx), None)
+            if not target:
+                raise HTTPException(404, "集号不存在")
+            vid = target["vid"]
+            fname = f"{H.sanitize(meta['title'])}_第{idx:03d}集.mp4"
+        path = _ensure_decrypted(vid, quality)   # 下载密文+离线解密+缓存
+        fname = fname or f"{vid}.mp4"
         from urllib.parse import quote as _q
-        fname = f"{H.sanitize(meta['title'])}_第{idx:03d}集.mp4"
-        cd = f"attachment; filename=\"ep{idx:03d}.mp4\"; filename*=UTF-8''{_q(fname)}"
-        return StreamingResponse(
-            upstream.iter_content(262144),
-            media_type="video/mp4",
-            headers={"Content-Disposition": cd,
-                     "Content-Length": upstream.headers.get("content-length", "")})
+        cd = f"inline; filename=\"{vid}.mp4\"; filename*=UTF-8''{_q(fname)}"
+        # FileResponse 自动处理 HTTP Range(206), 支持播放器 seek
+        return FileResponse(path, media_type="video/mp4", headers={"Content-Disposition": cd})
     except HTTPException:
         raise
     except Exception as e:
