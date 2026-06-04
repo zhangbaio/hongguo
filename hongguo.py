@@ -7,9 +7,13 @@
   python hongguo.py episodes <series_id>          # 列出某剧全部剧集
   python hongguo.py rank [recommend|hot|new] [数量]  # 漫剧榜单(推荐/热播/新剧)
   python hongguo.py latest [short_play|comic_series|ai_series] [--all]  # 今日上新(--all=最新上架全部)
+  python hongguo.py filters [short_play|comic_series|ai_series]   # 列出该体裁全部筛选条件(及参数id)
+  python hongguo.py browse <体裁> [--theme 主题][--setting 设定][--bg 背景][--sort 排序][--gender 受众][--days 7][--n 60]
   python hongguo.py download <series_id> [集号范围]  # 下载,如 1-10 或 all(默认all)
 
 例: python hongguo.py download 7638207474180312089 1-3
+例: python hongguo.py browse ai_series --theme 玄幻 --setting 逆袭 --sort hot_score --days 7
+程序内: filters(genre) / browse(genre, theme=, setting=, background=, sort=, gender=, days=, max_items=)
 """
 import sys, os, json, time, hashlib, re, subprocess, threading
 import urllib3
@@ -419,7 +423,7 @@ GENRES = {
 GENRE_NAMES = {"short_play": "短剧", "comic_series": "漫剧", "ai_series": "AI短剧"}
 
 
-def latest(genre="short_play", only_today=True, max_items=120, stop_ids=None):
+def latest(genre="short_play", only_today=True, max_items=120, stop_ids=None, refresh=False):
     """最新上架。
     - 短剧(short_play): 官方有'今日上新'标签。only_today=True 精确返回今日上新(扫描多页,
       整页无今日才停,处理交错); False 返回最新上架全部。
@@ -429,11 +433,6 @@ def latest(genre="short_play", only_today=True, max_items=120, stop_ids=None):
     """
     if genre not in GENRES:
         raise ValueError(f"genre必须是 {list(GENRES)}")
-    ck = SG.cache_key("latest", genre, only_today, max_items)
-    if not stop_ids:  # 监控增量模式(传 stop_ids)不读缓存, 且结果为部分新增不写缓存
-        cached = SG.cache_get(ck)
-        if cached is not None:
-            return cached
     scene, g = GENRES[genre]
     tag_today = (genre == "short_play")             # 仅短剧有'今日上新'标签
     online_time = [] if tag_today else ["days_7"]   # 漫剧/AI 用官方最细7天筛选
@@ -492,8 +491,105 @@ def latest(genre="short_play", only_today=True, max_items=120, stop_ids=None):
         if not j.get("data", {}).get("has_more", True):
             break
         offset += len(items)
-    if not stop_ids:
-        SG.cache_set(ck, out, ttl=1800)  # 缓存30分钟(增量模式不写)
+    return out
+
+
+# ---- 分类筛选(landpage selector) ----
+# 维度 -> select_items 键: 主题=category_dim_theme 设定=category_dim_role 背景=category_dim_epoch
+# 主题/设定/背景共用 cate_ 命名空间(名->id); 排序/受众/时间各自独立。原始 id(cate_/days_/数字)直接透传。
+FILTER_CATE = {
+    # 主题
+    "脑洞": "cate_755", "奇幻": "cate_6", "剧情": "cate_316", "玄幻": "cate_7",
+    "末世": "cate_68", "豪门": "cate_936", "科幻": "cate_1092", "冒险": "cate_1182",
+    # 设定
+    "重生": "cate_36", "穿越": "cate_37", "逆袭": "cate_739", "异能": "cate_598",
+    "系统": "cate_19", "反转": "cate_756", "娱乐圈": "cate_43", "总裁": "cate_29",
+    # 背景
+    "架空": "cate_452", "都市": "cate_1", "古代": "cate_758", "异界": "cate_599",
+    "校园": "cate_4", "职场": "cate_127", "年代": "cate_79", "乡村": "cate_11", "民国": "cate_390",
+}
+FILTER_SORT = {"最新上架": "online_time", "最新": "online_time", "最高热度": "hot_score",
+               "热度": "hot_score", "hot": "hot_score", "最高收藏": "hot_collect", "收藏": "hot_collect"}
+FILTER_GENDER = {"男频": "1", "男": "1", "女频": "0", "女": "0"}
+FILTER_DAYS = {"7": "days_7", "14": "days_14", "30": "days_30", "90": "days_90",
+               "7天内上新": "days_7", "14天内上新": "days_14", "30天内上新": "days_30", "90天内上新": "days_90"}
+
+
+def _ids(val, mapping):
+    """单值或列表 -> id 列表; 名称按 mapping 映射, 已是 id/未知则原样透传。"""
+    if val is None or val == "":
+        return []
+    vals = val if isinstance(val, (list, tuple)) else [val]
+    out = []
+    for v in vals:
+        v = str(v).strip()
+        if v:
+            out.append(mapping.get(v, v))
+    return out
+
+
+def filters(genre="short_play"):
+    """取某体裁的实时筛选面板。返回 [{type,row_name,selection_type,items:[{id,name}]}]。
+    type 即 select_items 的键(genre/category_dim_theme/category_dim_role/category_dim_epoch/sort/gender/online_time)。"""
+    scene, g = GENRES.get(genre, ("default", "short_play"))
+    body = {"filter_ids": "", "req_scene": scene, "offset": 0, "limit": 1,
+            "need_selector_panel": True, "req_type": "default", "client_req_type": 3,
+            "select_items": {"category_dim_epoch": [], "online_time": [], "gender": [],
+                             "category_dim_role": [], "genre": [g], "sort": [], "category_dim_theme": []},
+            "session_id": ""}
+    rows = api("POST", "/reading/distribution/category/landpage/v", body=body).get("data", {}).get("selector_rows", [])
+    return [{"type": r.get("type"), "row_name": r.get("row_name"), "selection_type": r.get("selection_type"),
+             "items": [{"id": it.get("selector_item_id"), "name": it.get("show_name")} for it in r.get("items", [])]}
+            for r in rows]
+
+
+def browse(genre="short_play", theme=None, setting=None, background=None,
+           sort="online_time", gender=None, days=None, max_items=120):
+    """按筛选条件浏览短剧/漫剧/AI短剧。各维度可传中文名或 id(cate_xxx)，单值或列表(多选)。
+    - genre   体裁: short_play/comic_series/ai_series
+    - theme   主题: 脑洞/奇幻/剧情/玄幻/末世/豪门/科幻/冒险 ...
+    - setting 设定: 重生/穿越/逆袭/异能/系统/反转/娱乐圈/总裁 ...
+    - background 背景: 架空/都市/古代/异界/校园/职场/年代/乡村/民国 ...
+    - sort    排序: 最新上架(online_time)/最高热度(hot_score)/最高收藏(hot_collect)
+    - gender  受众: 男频(1)/女频(0)
+    - days    时间: 7/14/30/90 (天内上新)
+    全部可选项见 filters(genre)。返回 [{series_id,title,episode_cnt,score,play_cnt,cover,category,intro}]。"""
+    if genre not in GENRES:
+        raise ValueError(f"genre 必须是 {list(GENRES)}")
+    scene, g = GENRES[genre]
+    sel = {"genre": [g],
+           "category_dim_theme": _ids(theme, FILTER_CATE),
+           "category_dim_role": _ids(setting, FILTER_CATE),
+           "category_dim_epoch": _ids(background, FILTER_CATE),
+           "sort": _ids(sort, FILTER_SORT) or ["online_time"],
+           "gender": _ids(gender, FILTER_GENDER),
+           "online_time": _ids(days, FILTER_DAYS)}
+    out, shown, offset, pages = [], [], 0, 0
+    while len(out) < max_items and pages < 20:
+        body = {"filter_ids": ",".join(shown), "req_scene": scene, "offset": offset,
+                "need_selector_panel": False, "limit": 18, "select_items": sel,
+                "session_id": "", "req_type": "only_content", "client_req_type": 3}
+        j = api("POST", "/reading/distribution/category/landpage/v", body=body)
+        items = j.get("data", {}).get("video_data", [])
+        if not items:
+            break
+        for it in items:
+            sid = str(it.get("series_id"))
+            shown.append(sid)
+            cats = []
+            for nm in re.findall(r'"name":"([^"]+)"', it.get("category_schema", "")):
+                if nm and nm not in cats:
+                    cats.append(nm)
+            out.append({"series_id": sid, "title": it.get("title", ""),
+                        "episode_cnt": it.get("episode_cnt", 0), "score": it.get("score", ""),
+                        "play_cnt": it.get("play_cnt", 0), "cover": it.get("cover", ""),
+                        "category": " / ".join(cats), "intro": (it.get("video_desc") or "")[:50]})
+            if len(out) >= max_items:
+                break
+        pages += 1
+        if not j.get("data", {}).get("has_more", True):
+            break
+        offset += len(items)
     return out
 
 
@@ -615,6 +711,10 @@ def cmd_download_old(series_id, rng="all", ep_covers=False):
 
 
 def main():
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
     if len(sys.argv) < 2:
         print(__doc__); return
     cmd = sys.argv[1]
@@ -659,6 +759,23 @@ def main():
             if not a.startswith("--"):
                 rng = a; break
         cmd_download(sys.argv[2], rng, ep_covers)
+    elif cmd == "filters":
+        genre = sys.argv[2] if len(sys.argv) > 2 else "short_play"
+        print(f"=== {GENRE_NAMES.get(genre, genre)} 筛选面板 ===")
+        for row in filters(genre):
+            opts = "  ".join(f"{it['name']}={it['id']}" for it in row["items"])
+            print(f"【{row['row_name']}】(type={row['type']}, 多选={row['selection_type']==2})\n  {opts}")
+    elif cmd == "browse":
+        # browse <genre> [--theme 玄幻] [--setting 逆袭] [--bg 古代] [--sort hot_score] [--gender 男频] [--days 7] [--n 60]
+        genre = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith("--") else "ai_series"
+        def _opt(name):
+            return sys.argv[sys.argv.index(name) + 1] if name in sys.argv and sys.argv.index(name) + 1 < len(sys.argv) else None
+        items = browse(genre, theme=_opt("--theme"), setting=_opt("--setting"), background=_opt("--bg"),
+                       sort=_opt("--sort") or "online_time", gender=_opt("--gender"), days=_opt("--days"),
+                       max_items=int(_opt("--n") or 60))
+        print(f"=== {GENRE_NAMES.get(genre, genre)} 筛选结果 ({len(items)}部) ===")
+        for it in items:
+            print(f"  [{it['episode_cnt']}集] ★{it['score']} {it['play_cnt']}播放 [{it['category']}] {it['title']}  (id={it['series_id']})")
     else:
         print(__doc__)
 
