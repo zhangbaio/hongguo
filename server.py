@@ -313,7 +313,12 @@ def api_browse(genre: str = "ai_series", theme: str = None, setting: str = None,
     try:
         items = H.browse(genre, theme=_csv(theme), setting=_csv(setting), background=_csv(background),
                          sort=sort, gender=gender, days=days, status=status, max_items=limit)
-        return {"genre": genre, "name": H.GENRE_NAMES.get(genre), "count": len(items), "items": items}
+        for it in items:                                  # 补服务端可播/取集链接(剧级→播第1集)
+            sid = it["series_id"]
+            it["stream_url"] = f"/stream?series_id={sid}&ep=1"   # 直接播第1集(服务端解密)
+            it["episodes_url"] = f"/episodes?series_id={sid}"     # 列全集(拿各集再 /stream?...&ep=N)
+        return {"genre": genre, "name": H.GENRE_NAMES.get(genre), "count": len(items),
+                "note": "stream_url=播第1集; 其它集用 episodes_url 取集号后 /stream?series_id=&ep=N", "items": items}
     except Exception as e:
         raise HTTPException(500, f"browse失败: {e}")
 

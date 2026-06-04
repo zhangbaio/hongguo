@@ -122,6 +122,7 @@ GET /filters?genre=comic_series                                  # 某体裁全�
 GET /browse?genre=ai_series&theme=玄幻&setting=逆袭&sort=hot_score&days=7&status=已完结&limit=60
 #   各维度传中文名或id(cate_xxx); 多选用逗号(theme=玄幻,科幻); 中文需URL编码
 #   维度: theme主题 setting设定 background背景 sort排序 gender受众 days时间 status状态(仅漫剧)
+#   每个结果项含 stream_url(直接播第1集) + episodes_url(列全集, 再 /stream?series_id=&ep=N 播其它集)
 ```
 对应 `hongguo.py` 的 `H.filters(genre)` / `H.browse(genre, theme=, setting=, background=, sort=, gender=, days=, status=)`。
 全部维度与选项 ID 见 `capture/{ai_series,comic_series}_filters.json`。
