@@ -8,7 +8,7 @@
   python hongguo.py rank [recommend|hot|new] [数量]  # 漫剧榜单(推荐/热播/新剧)
   python hongguo.py latest [short_play|comic_series|ai_series] [--all]  # 今日上新(--all=最新上架全部)
   python hongguo.py filters [short_play|comic_series|ai_series]   # 列出该体裁全部筛选条件(及参数id)
-  python hongguo.py browse <体裁> [--theme 主题][--setting 设定][--bg 背景][--sort 排序][--gender 受众][--days 7][--n 60]
+  python hongguo.py browse <体裁> [--theme 主题][--setting 设定][--bg 背景][--sort 排序][--gender 受众][--status 状态(仅漫剧)][--days 7][--n 60]
   python hongguo.py download <series_id> [集号范围]  # 下载,如 1-10 或 all(默认all)
 
 例: python hongguo.py download 7638207474180312089 1-3
@@ -513,6 +513,9 @@ FILTER_SORT = {"最新上架": "online_time", "最新": "online_time", "最高�
 FILTER_GENDER = {"男频": "1", "男": "1", "女频": "0", "女": "0"}
 FILTER_DAYS = {"7": "days_7", "14": "days_14", "30": "days_30", "90": "days_90",
                "7天内上新": "days_7", "14天内上新": "days_14", "30天内上新": "days_30", "90天内上新": "days_90"}
+# 状态(仅漫剧 comic_series 有此维度): type=creation_status
+FILTER_STATUS = {"已完结": "creation_status_0", "完结": "creation_status_0",
+                 "连载中": "creation_status_1", "连载": "creation_status_1"}
 
 
 def _ids(val, mapping):
@@ -544,7 +547,7 @@ def filters(genre="short_play"):
 
 
 def browse(genre="short_play", theme=None, setting=None, background=None,
-           sort="online_time", gender=None, days=None, max_items=120):
+           sort="online_time", gender=None, days=None, status=None, max_items=120):
     """按筛选条件浏览短剧/漫剧/AI短剧。各维度可传中文名或 id(cate_xxx)，单值或列表(多选)。
     - genre   体裁: short_play/comic_series/ai_series
     - theme   主题: 脑洞/奇幻/剧情/玄幻/末世/豪门/科幻/冒险 ...
@@ -553,6 +556,7 @@ def browse(genre="short_play", theme=None, setting=None, background=None,
     - sort    排序: 最新上架(online_time)/最高热度(hot_score)/最高收藏(hot_collect)
     - gender  受众: 男频(1)/女频(0)
     - days    时间: 7/14/30/90 (天内上新)
+    - status  状态(仅漫剧): 已完结/连载中
     全部可选项见 filters(genre)。返回 [{series_id,title,episode_cnt,score,play_cnt,cover,category,intro}]。"""
     if genre not in GENRES:
         raise ValueError(f"genre 必须是 {list(GENRES)}")
@@ -563,6 +567,7 @@ def browse(genre="short_play", theme=None, setting=None, background=None,
            "category_dim_epoch": _ids(background, FILTER_CATE),
            "sort": _ids(sort, FILTER_SORT) or ["online_time"],
            "gender": _ids(gender, FILTER_GENDER),
+           "creation_status": _ids(status, FILTER_STATUS),
            "online_time": _ids(days, FILTER_DAYS)}
     out, shown, offset, pages = [], [], 0, 0
     while len(out) < max_items and pages < 20:
@@ -772,7 +777,7 @@ def main():
             return sys.argv[sys.argv.index(name) + 1] if name in sys.argv and sys.argv.index(name) + 1 < len(sys.argv) else None
         items = browse(genre, theme=_opt("--theme"), setting=_opt("--setting"), background=_opt("--bg"),
                        sort=_opt("--sort") or "online_time", gender=_opt("--gender"), days=_opt("--days"),
-                       max_items=int(_opt("--n") or 60))
+                       status=_opt("--status"), max_items=int(_opt("--n") or 60))
         print(f"=== {GENRE_NAMES.get(genre, genre)} 筛选结果 ({len(items)}部) ===")
         for it in items:
             print(f"  [{it['episode_cnt']}集] ★{it['score']} {it['play_cnt']}播放 [{it['category']}] {it['title']}  (id={it['series_id']})")
