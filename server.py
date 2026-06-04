@@ -8,6 +8,8 @@
 接口:
   GET /search?q=剧名
   GET /rank?board=recommend|hot|new&limit=30
+  GET /filters?genre=comic_series         取某体裁全部筛选条件(实时)
+  GET /browse?genre=ai_series&theme=玄幻&sort=hot_score&days=7   按筛选浏览(多选逗号分隔)
   GET /episodes?series_id=xxx
   GET /play?series_id=xxx&ep=1            取剧集信息(encrypted_url密文直链 + stream_url可播)
   GET /stream?series_id=xxx&ep=1          ★服务端【纯离线解密】后串流, 客户端拿到可播mp4
@@ -155,6 +157,7 @@ def index():
     return {"service": "红果短剧API", "ui": "/ui", "endpoints": [
         "/search?q=", "/rank?board=recommend|hot|new&limit=",
         "/latest?genre=short_play|comic_series|ai_series&only_today=true",
+        "/filters?genre=comic_series", "/browse?genre=ai_series&theme=玄幻&sort=hot_score&days=7",
         "/episodes?series_id=", "/play?series_id=&ep=1-10",
         "/download?series_id=&ep=1-10", "/download/status?task_id=",
         "/stream?series_id=&ep=1 (解密可播)", "/stream?vid=&quality=1080p", "/stats"]}
@@ -267,13 +270,13 @@ def api_rank(board: str = "recommend", limit: int = 30):
 
 
 @app.get("/latest")
-def api_latest(genre: str = "short_play", only_today: bool = True, limit: int = 120):
+def api_latest(genre: str = "short_play", only_today: bool = True, limit: int = 120, refresh: bool = False, no_cache: bool = False):
     """最新上架/今日上新。genre: short_play(短剧)|comic_series(漫剧)|ai_series(AI短剧)。
     短剧支持精确'今日上新'(官方标签); 漫剧/AI官方无今日粒度,返回'7天内上新·最新上架'。"""
     if genre not in H.GENRES:
         raise HTTPException(400, f"genre必须是 {list(H.GENRES)}")
     try:
-        items = H.latest(genre, only_today=only_today, max_items=limit)
+        items = H.latest(genre, only_today=only_today, max_items=limit, refresh=refresh or no_cache)
         # 诚实标注模式
         if genre == "short_play":
             mode = "今日上新" if only_today else "最新上架"
@@ -283,6 +286,36 @@ def api_latest(genre: str = "short_play", only_today: bool = True, limit: int = 
                 "only_today": only_today, "count": len(items), "items": items}
     except Exception as e:
         raise HTTPException(500, f"latest失败: {e}")
+
+
+@app.get("/filters")
+def api_filters(genre: str = "short_play"):
+    """取某体裁的全部筛选条件(实时面板)。genre: short_play|comic_series|ai_series。
+    返回各维度(type=select_items键) + 选项(id/name)。漫剧多一维 creation_status(状态)。"""
+    if genre not in H.GENRES:
+        raise HTTPException(400, f"genre必须是 {list(H.GENRES)}")
+    try:
+        return {"genre": genre, "name": H.GENRE_NAMES.get(genre), "rows": H.filters(genre)}
+    except Exception as e:
+        raise HTTPException(500, f"filters失败: {e}")
+
+
+@app.get("/browse")
+def api_browse(genre: str = "ai_series", theme: str = None, setting: str = None,
+               background: str = None, sort: str = "online_time", gender: str = None,
+               days: str = None, status: str = None, limit: int = 60):
+    """按筛选条件浏览。各维度传中文名或id; 多选用逗号分隔(如 theme=玄幻,科幻)。可选项见 /filters。
+    theme主题 setting设定 background背景 sort排序 gender受众 days时间(7/14/30/90) status状态(仅漫剧:已完结/连载中)。"""
+    if genre not in H.GENRES:
+        raise HTTPException(400, f"genre必须是 {list(H.GENRES)}")
+    def _csv(v):
+        return [x.strip() for x in v.split(",") if x.strip()] if v else None
+    try:
+        items = H.browse(genre, theme=_csv(theme), setting=_csv(setting), background=_csv(background),
+                         sort=sort, gender=gender, days=days, status=status, max_items=limit)
+        return {"genre": genre, "name": H.GENRE_NAMES.get(genre), "count": len(items), "items": items}
+    except Exception as e:
+        raise HTTPException(500, f"browse失败: {e}")
 
 
 @app.get("/episodes")
