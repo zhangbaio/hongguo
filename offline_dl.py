@@ -11,12 +11,14 @@
 用法:
   python offline_dl.py search "剧名"
   python offline_dl.py rank [recommend|hot|new]
-  python offline_dl.py series <series_id> [范围 1-5/3/all] [-c 并发] [-r 重试轮数]
-  python offline_dl.py resume <series_id> [-c 并发] [-r 重试轮数]   # 只补未完成/失败集
-  python offline_dl.py vid <vid> [输出文件名]
-  python offline_dl.py batch <id1> <id2> ... [-c 并发] [-r 重试轮数]
+  python offline_dl.py quals <vid>                                 # 列某集可选清晰度
+  python offline_dl.py series <series_id> [范围 1-5/3/all] [-c 并发] [-r 重试轮] [-q 清晰度]
+  python offline_dl.py resume <series_id> [-c 并发] [-r 重试轮] [-q 清晰度]   # 只补未完成/失败集
+  python offline_dl.py vid <vid> [输出文件名] [-q 清晰度]
+  python offline_dl.py batch <id1> <id2> ... [-c 并发] [-r 重试轮] [-q 清晰度]
   python offline_dl.py status <series_id>                          # 看进度
-  # 并发默认4; 重试默认2轮。
+  # -q: best(默认)/worst/1080p/720p/540p/480p/360p(或纯数字); 不存在则取<=请求的最高档。
+  # 并发默认4; 重试默认2轮。⚠同一集不同清晰度文件名相同会跳过, 换清晰度需先删旧文件或用不同 vid 名。
 """
 import sys, os, json, re, threading, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -81,16 +83,45 @@ def _video_model(vid):
         return None
     return json.loads(v["video_model"])
 
-def _best_track(vm):
-    best = None
-    for it in vm.get("video_list", []):
-        sz = (it.get("video_meta") or {}).get("size", 0) or 0
-        if best is None or sz > best[0]:
-            best = (sz, it)
-    return best[1] if best else None
+def _defn(t):
+    return ((t.get("video_meta") or {}).get("definition") or "").lower()
+def _sz(t):
+    return (t.get("video_meta") or {}).get("size", 0) or 0
+def _dnum(t):
+    return int(re.sub(r"\D", "", _defn(t)) or 0)
 
-def dl_vid(vid, name=None, retries=2, quiet=False):
-    """下载+解密单集; 返回输出路径或 None。各集独立文件, 线程安全。"""
+def list_quals(vm):
+    """返回 [(definition, size, wxh, codec, encrypt)] 按分辨率升序。"""
+    out = []
+    for t in vm.get("video_list", []):
+        m = t.get("video_meta") or {}
+        out.append((_defn(t) or "?", _sz(t), f"{m.get('vwidth')}x{m.get('vheight')}",
+                    m.get("codec_type") or t.get("codec_type"), (t.get("encrypt_info") or {}).get("encrypt")))
+    return sorted(out, key=lambda x: int(re.sub(r"\D", "", x[0]) or 0))
+
+def _pick_track(vm, quality="best"):
+    """按清晰度选轨。quality: best(默认)/worst/1080p/720p/540p/480p/360p(或纯数字)。
+    指定清晰度不存在时取 <=请求 的最高一档(没有则最低)。返回 (track, 实际definition, 是否回退)。"""
+    tracks = vm.get("video_list", [])
+    if not tracks:
+        return None, None, False
+    q = str(quality or "best").lower().strip()
+    if q in ("best", "max", "high", "highest"):
+        t = max(tracks, key=_sz); return t, _defn(t), False
+    if q in ("worst", "min", "low", "lowest"):
+        t = min(tracks, key=_sz); return t, _defn(t), False
+    qnum = re.sub(r"\D", "", q)
+    exact = [t for t in tracks if _defn(t) == q or (qnum and re.sub(r"\D", "", _defn(t)) == qnum)]
+    if exact:
+        t = max(exact, key=_sz); return t, _defn(t), False
+    # 回退: <=请求 的最高一档; 否则最低
+    avail = sorted(tracks, key=_dnum)
+    le = [t for t in avail if qnum and _dnum(t) <= int(qnum)]
+    t = le[-1] if le else avail[0]
+    return t, _defn(t), True
+
+def dl_vid(vid, name=None, retries=2, quiet=False, quality="best"):
+    """下载+解密单集; 返回输出路径或 None。各集独立文件, 线程安全。quality 见 _pick_track。"""
     os.makedirs(OUT, exist_ok=True)
     name = H.sanitize(name or str(vid))
     out = os.path.join(OUT, name + ".mp4")
@@ -103,12 +134,13 @@ def dl_vid(vid, name=None, retries=2, quiet=False):
         try:
             vm = _video_model(vid)
             if not vm: last = "无video_model"; continue
-            tr = _best_track(vm)
+            tr, gotdef, fallback = _pick_track(vm, quality)
             if not tr: last = "无video_list"; continue
             enc = tr.get("encrypt_info") or {}
             meta = tr.get("video_meta") or {}
             if not quiet:
-                log(f"[*] {name}  [{meta.get('definition')}, {(meta.get('size') or 0)//1024}KB]")
+                fb = f" (无{quality}, 回退)" if fallback else ""
+                log(f"[*] {name}  [{meta.get('definition')}{fb}, {(meta.get('size') or 0)//1024}KB]")
             if not enc.get("encrypt"):
                 H.download_file(tr["main_url"], out); return out
             H.download_file(tr["main_url"], ct)
@@ -132,10 +164,10 @@ def dl_vid(vid, name=None, retries=2, quiet=False):
 
 
 # ---------- 整剧(续传+重试) ----------
-def dl_series(series_id, rng="all", concurrency=4, retry_rounds=2, only_unfinished=False):
+def dl_series(series_id, rng="all", concurrency=4, retry_rounds=2, quality="best"):
     meta, eps = H.get_episodes(series_id)
     title = H.sanitize(meta["title"])
-    st = _load_state(series_id); st["title"] = title; st["series_id"] = str(series_id)
+    st = _load_state(series_id); st["title"] = title; st["series_id"] = str(series_id); st["quality"] = quality
     # 范围过滤
     if rng != "all":
         m = re.match(r"(\d+)-(\d+)", rng)
@@ -148,14 +180,14 @@ def dl_series(series_id, rng="all", concurrency=4, retry_rounds=2, only_unfinish
     pending = [e for e in eps if not _is_done(st, e["index"])]
     skipped = len(eps) - len(pending)
     log(f"《{title}》共 {meta.get('episode_cnt','?')} 集 | {meta['status']} | 目标 {len(eps)} 集 | "
-        f"已完成跳过 {skipped} | 待下 {len(pending)} | 并发 {concurrency}")
+        f"已完成跳过 {skipped} | 待下 {len(pending)} | 清晰度 {quality} | 并发 {concurrency}")
     if not pending:
         log(f"《{title}》全部已完成 ✓ -> {OUT}"); return {"ok": skipped, "fail": 0, "total": len(eps)}
 
     dlock = threading.Lock(); done = {"ok": 0, "fail": 0}
     def work(e):
         idx = e["index"]
-        path = dl_vid(e["vid"], f"{title}_第{(idx or 0):03d}集", retries=2)
+        path = dl_vid(e["vid"], f"{title}_第{(idx or 0):03d}集", retries=2, quality=quality)
         with dlock:
             ent = st["episodes"].setdefault(str(idx), {"vid": e["vid"], "attempts": 0})
             ent["vid"] = e["vid"]; ent["attempts"] = ent.get("attempts", 0) + 1; ent["ts"] = int(time.time())
@@ -206,38 +238,45 @@ def show_status(series_id):
 
 
 def _pop_opts(args):
-    """取出 -c N / -r N; 返回(剩余, 并发, 重试轮)。"""
-    c, r, rest, i = 4, 2, [], 0
+    """取出 -c N / -r N / -q 清晰度; 返回(剩余, 并发, 重试轮, 清晰度)。"""
+    c, r, q, rest, i = 4, 2, "best", [], 0
     while i < len(args):
         if args[i] in ("-c", "--concurrency") and i+1 < len(args): c = max(1, int(args[i+1])); i += 2
         elif args[i] in ("-r", "--retry") and i+1 < len(args): r = max(0, int(args[i+1])); i += 2
+        elif args[i] in ("-q", "--quality") and i+1 < len(args): q = args[i+1]; i += 2
         else: rest.append(args[i]); i += 1
-    return rest, c, r
+    return rest, c, r, q
 
 
 def main():
     if len(sys.argv) < 2:
         print(__doc__); return
     cmd = sys.argv[1]
-    rest, conc, rr = _pop_opts(sys.argv[2:])
+    rest, conc, rr, q = _pop_opts(sys.argv[2:])
     if cmd == "search":
         for x in H.search(rest[0]):
             print(f"  {x['series_id']}  [{x['episode_cnt']}集] ★{x.get('score','')}  {x['title']}")
     elif cmd == "rank":
         for x in H.rank(rest[0] if rest else "recommend"):
             print(f"  {x['rank']:>2}. {x['series_id']}  [{x['episode_cnt']}集]  {x['title']}")
+    elif cmd == "quals":   # 列某集可选清晰度
+        vm = _video_model(rest[0])
+        if not vm: print("无 video_model"); return
+        print(f"vid {rest[0]} 可选清晰度:")
+        for d, sz, wh, codec, enc in list_quals(vm):
+            print(f"  {d:>7}  {sz//1024:>7}KB  {wh:>10}  codec={codec}  encrypt={enc}")
     elif cmd == "series":
-        dl_series(rest[0], rest[1] if len(rest) > 1 else "all", concurrency=conc, retry_rounds=rr)
+        dl_series(rest[0], rest[1] if len(rest) > 1 else "all", concurrency=conc, retry_rounds=rr, quality=q)
     elif cmd == "resume":
-        dl_series(rest[0], "all", concurrency=conc, retry_rounds=rr)  # _is_done 自动跳已完成, 只补失败/缺失
+        dl_series(rest[0], "all", concurrency=conc, retry_rounds=rr, quality=q)
     elif cmd == "status":
         show_status(rest[0])
     elif cmd == "vid":
-        dl_vid(rest[0], rest[1] if len(rest) > 1 else None)
+        dl_vid(rest[0], rest[1] if len(rest) > 1 else None, quality=q)
     elif cmd == "batch":
         tot = {"ok": 0, "all": 0}
         for sid in rest:
-            d = dl_series(sid, "all", concurrency=conc, retry_rounds=rr)
+            d = dl_series(sid, "all", concurrency=conc, retry_rounds=rr, quality=q)
             tot["ok"] += d["ok"]; tot["all"] += d["total"]
         log(f"\n=== 批量完成: {tot['ok']}/{tot['all']} 集, {len(rest)} 部剧 ===")
     else:
