@@ -1,105 +1,174 @@
-# 红果短剧下载器
+# 红果短剧下载器（全自动 · 纯离线解密）
 
-通过逆向红果短剧(com.phoenix.read, 字节系)的接口实现的命令行下载器。
-核心难点是字节的 X-Argus/X-Gorgon 签名(native层、几分钟过期),
-方案是用 **Frida 签名预言机**——让模拟器里的 app 自己算签名,Python 调用。
+逆向红果短剧（com.phoenix.read，字节系）实现的命令行下载器：**搜索/榜单 → 选清晰度 → 整剧批量 → 多线程并发 → 断点续传 → 纯离线解密 → 可播 mp4**。
 
-## 架构
+两个核心难点都已攻破：
+1. **接口签名** X-Argus/X-Gorgon（native、几分钟过期）→ **Frida 签名预言机**（模拟器里 app 自己算签名，Python 调用）。
+2. **视频加密** 标准 CENC **AES-128-CTR**，每集密钥由 `spade_a` 经 **`libttmplayer.so` 内纯字节变换**算出（**无 KEK、无 AES**）→ 已 100% 纯 Python 复现，**解密全程离线**（无需 app/播放/frida）。
+
+> 逆向全过程见 `docs/VIDEO_DECRYPTION_RE.md`（§16 接力指南）与 `docs/逆向复盘-spade解密-20260604.md`。
+
+---
+
+## 完整链路
 
 ```
-搜索 search/tab/v ─→ series_id
-   │
-multi_video_detail ─→ 全部剧集的 vid
-   │
-multi_video_model ──→ video_model.main_url (真实MP4直链)   ← 需要签名
-   │                         ↑
-   │              Frida预言机(app内NetworkParams.tryAddSecurityFactor)
-   │
-GET main_url ───────→ 下载 mp4
+search/tab/v ─→ series_id
+  │
+multi_video_detail ─→ 各集 vid
+  │
+multi_video_model ─→ video_model           ← 需要签名(Frida预言机)
+  │   ├─ video_list[].main_url              (CDN 密文直链)
+  │   ├─ video_list[].encrypt_info.spade_a  (★ 包装的内容密钥)
+  │   └─ video_list[].video_meta.definition (清晰度)
+  │
+  ├─ unwrap_spade(spade_a) ──→ content key(16B)   [纯算法, 无KEK, 无app]
+  ├─ GET main_url ───────────→ 下载 CDN 密文 mp4
+  ├─ 密文 senc 盒 ───────────→ base_iv64(8B)
+  └─ AES-128-CTR(key, IV=((base_iv+样本序号)<<64)) 逐样本解密 ─→ 明文 mp4
 ```
 
-## 运行环境(一次性配好,已完成)
+**只有"调 API 取 spade+直链"这一步需要签名（模拟器+app）；下载与解密完全离线纯 Python。**
 
-- **MuMu12 模拟器**(安卓12, 已root), adb 端口 127.0.0.1:16384
-- 红果 App 已安装(com.phoenix.read 7.2.2.32)
-- **frida-server** x86_64 16.7.19 在 /data/local/tmp/frida-server
-- 宿主机: Python + frida + requests + mitmproxy(仅解析抓包用)
-- `config.json`: 设备参数+会话凭证(从抓包提取, 见 extract_config.py)
+---
 
-> 注意: 下载器**不需要** WireGuard/mitmproxy 代理。那套是当初抓包发现接口用的。
-> 现在 API 请求从宿主机直连字节服务器,签名由 Frida 预言机(运行中的app)提供。
+## 快速开始
 
-## 用法
-
-**每次先启动预言机环境:**
 ```powershell
+# 0) 启动签名环境(MuMu + frida-server + 红果 app 运行)
 .\start_oracle.ps1
-```
-(确保 MuMu 开着 + frida-server 跑着 + 红果 app 在前台/后台运行)
 
-**然后用下载器:**
+# 1) 搜索
+python offline_dl.py search "皇后"
+#   7607003595136846872  [81集] ★8.1  皇后她自带江山
+
+# 2) 下载整剧(自动下载+解密, 默认1080p, 4线程, 断点续传)
+python offline_dl.py series 7607003595136846872
+
+# 3) 看进度 / 断点续跑
+python offline_dl.py status 7607003595136846872
+python offline_dl.py resume 7607003595136846872
+```
+输出到 `downloads/<剧名>_第NNN集.mp4`（可播 mp4）。
+
+---
+
+## 命令速查（`offline_dl.py`）
+
+| 命令 | 说明 |
+|---|---|
+| `search "剧名"` | 搜索短剧 → series_id/集数/评分/剧名 |
+| `rank [recommend\|hot\|new]` | 榜单 |
+| `quals <vid>` | 列某集全部可选清晰度（分辨率/大小/编码） |
+| `series <series_id> [范围] [选项]` | 下载整剧/范围（`1-5` / `3` / `all`默认） |
+| `resume <series_id> [选项]` | 只补未完成/失败集（断点续传） |
+| `status <series_id>` | 看进度（已完成/失败集+错误） |
+| `vid <vid> [文件名] [-q]` | 下载单集 |
+| `batch <id1> <id2> ... [选项]` | **多剧并行**（所有剧待下集汇入同一全局池） |
+
+**通用选项**：
+
+| 选项 | 含义 | 默认 |
+|---|---|---|
+| `-c N` `--concurrency` | **全局并发上限**（跨剧共享，总同时下载+解密任务 ≤ N） | 4 |
+| `-r N` `--retry` | 失败集自动重试轮数 | 2 |
+| `-q Q` `--quality` | 清晰度：`best`/`worst`/`1080p`/`720p`/`540p`/`480p`/`360p`（或纯数字）；指定档不存在则取 ≤ 请求的最高档 | best |
+
+**示例**：
 ```powershell
-# 搜索短剧
-python hongguo.py search "极品皇太子"
-#   7638207474180312089  [81集] 极品皇太子  - 站在你面前的...
-
-# 列出某剧全部剧集
-python hongguo.py episodes 7638207474180312089
-
-# 漫剧榜单(推荐榜/热播榜/新剧榜), 可指定数量
-python hongguo.py rank recommend 30   # 推荐榜
-python hongguo.py rank hot            # 热播榜
-python hongguo.py rank new            # 新剧榜
-#   → 列出排名/剧名/集数/评分/播放量/series_id, id可直接喂download
-
-# 今日上新(按体裁), 加 --all 则为最新上架全部
-python hongguo.py latest short_play     # 短剧今日上新
-python hongguo.py latest comic_series   # 漫剧今日上新
-python hongguo.py latest ai_series      # AI短剧今日上新
-python hongguo.py latest short_play --all  # 短剧最新上架(不限今日)
-
-# 下载(集号范围 / 单集 / 全部)
-python hongguo.py download 7638207474180312089 1-10
-python hongguo.py download 7638207474180312089 5
-python hongguo.py download 7638207474180312089        # 全部81集
-python hongguo.py download 7638207474180312089 1-10 --ep-covers  # 同时下每集封面
+python offline_dl.py series 7607003595136846872 1-20 -c 6 -q 1080p
+python offline_dl.py vid 7607005789365996568 -q 720p
+python offline_dl.py batch 7607003595136846872 7632308004930456638 -c 6
+python offline_dl.py quals 7607005789365996568
 ```
 
-下载到 `downloads/<剧名>/`，包含:
-- `<剧名>_第NNN集.mp4` —— 视频 (1080p)
-- `cover.heic` —— 整剧封面
-- `info.json` —— 完整元数据(简介/演员表/分类/状态/播放量/全集清单)
-- `<剧名>_第NNN集.jpg` —— 每集封面(加 `--ep-covers` 才下)
+---
 
-### 能获取的信息
-- **搜索**: series_id、剧名、集数、评分、热度/播放量、出品方、简介、封面
-- **详情(episodes / info.json)**: 上述 + 演员表(演员/角色/头像/简介)、完结状态、
-  上线时间、追剧数、分类标签，以及每集的(标题/时长/封面/评论数/点赞数)
+## 纯离线解密（无需 app / 网络 / frida）
 
-## 访问控制(API 密钥)
-服务端(server.py)**强制鉴权**: 所有数据接口必须带有效 `api_key`(请求头 `X-API-Key` 或 `?api_key=`)，否则 401。
-- 密钥存于 `apikeys.json`(不进仓库)，在管理页 **`/admin`** 一键生成/吊销/删除(需 `ADMIN_TOKEN`)。
-- `ADMIN_TOKEN` 等放 `.env.ps1`(不进仓库，模板 `.env.ps1.example`)，`start_all.ps1` 自动加载。
-- 客户端(如 weixin 工具的"本地链路密钥"、网页 `/ui` 的 api_key 框)填生成的密钥即可。
-- `/`、`/ui`、`/img` 免鉴权(页面/封面)；`/admin`、`/stats` 需 `ADMIN_TOKEN`。
+已有 `spade_a`(base64) + 密文 mp4 时，直接本地解密：
+
+```powershell
+python frida/offline_decrypt.py "<spade_a_base64>" <密文.mp4> [输出.mp4]
+# 自动: unwrap出key + senc读base_iv + key×base_iv试解(NAL自证) + AES-CTR全解
+```
+
+只算密钥（验证算法）：
+```powershell
+python frida/unwrap_spade.py                 # 跑内置真值自测(5/5 passed)
+python frida/unwrap_spade.py <spade_a_base64> # 输出 content key(32 hex)
+```
+> 依赖仅 `pycryptodome`（解密用）；`unwrap_spade` 纯标准库。
+
+---
+
+## 清晰度与编码（重要）
+
+| 清晰度 | 编码 | 播放 |
+|---|---|---|
+| **1080p** | bytevc1 = **HEVC** | ✅ 通用，任意播放器 |
+| 720p / 540p / 480p / 360p | **bytevc2**（bvc2，字节自研） | 解密正确，但需**支持 ByteVC2 的播放器**（ffmpeg 内置不解 bvc2） |
+
+日常建议默认 **1080p（HEVC，通用可播）**。低清晰度省空间，但播放需兼容解码器。
+> ⚠ 同一集换清晰度因文件名相同会被"已存在"跳过——换清晰度需先删旧文件或用 `vid` 自定义名。
+
+---
+
+## 断点续传与状态
+
+- 每集完成**即时落盘** `downloads/.state/series_<id>.json`（记 `vid/status/file/error/attempts`）。
+- 重跑自动**跳过已完成**（校验文件仍在，删了会重下），只补未完成/失败集 → 中断后 `resume`/重跑即续传。
+- 单次运行内失败集**自动多轮重试**（`-r`，带退避）；`dl_vid` 内层另有 2 次重试（url 过期自动重取 video_model）。
+- `status` 查看进度与失败原因。
+
+---
+
+## 运行环境（签名所需；解密不需要）
+
+- **MuMu12 模拟器**（安卓12，已 root），adb `127.0.0.1:16384`
+- 红果 App 已安装运行（com.phoenix.read）
+- **frida-server 16.x**（与宿主机 frida-python **同版本**；frida 17 移除内置 Java bridge → `oracle.js` 的 `Java.use` 报错）
+- 宿主机 Python：`frida==16.x`、`pycryptodome`、`requests`
+- `config.json`：设备参数 + 会话凭证（见 `extract_config.py`）
+- 环境变量（默认即本机 MuMu，可覆盖）：`ADB` / `ADB_DEVICE` / `FRIDA_HOST`(默认 127.0.0.1:27042)
+- 签名后端：默认进程内 Frida；也可设 `SIGN_SERVER=http://...`（HTTP 签名服务，多设备池轮询）
+
+> 下载器**不需要** WireGuard/mitmproxy 代理（那是当初抓包发现接口用的）。
+
+---
 
 ## 关键文件
 
 | 文件 | 作用 |
-|------|------|
-| `hongguo.py` | **主下载器**(search/episodes/download) |
-| `frida/oracle.js` | Frida 签名预言机(rpc.exports.sign) |
-| `config.json` | 设备参数+会话凭证 |
-| `start_oracle.ps1` | 一键启动预言机环境 |
-| `extract_config.py` | 从抓包重新提取 config |
-| `parse_flow.py` | 解析 capture/out/full.flow(抓包分析) |
+|---|---|
+| **`offline_dl.py`** | **全自动下载器**（搜索/榜单/选集/清晰度/并发/续传/重试/解密） |
+| `frida/offline_decrypt.py` | 纯离线解密：`spade_a + 密文 → 明文 mp4` |
+| `frida/unwrap_spade.py` | `spade_a → content key` 纯算法（含真值自测） |
+| `frida/decutil.py` | senc 读 base_iv / tenc kid / AES-128-CTR 全解 |
+| `hongguo.py` | API 客户端（search/rank/get_episodes/get_video_urls）+ 签名 |
+| `frida/oracle.js` | Frida 签名预言机（hook NetworkParams.tryAddSecurityFactor） |
+| `config.json` | 设备参数 + 会话凭证（不入库） |
+| `start_oracle.ps1` | 一键启动签名环境 |
+| `docs/VIDEO_DECRYPTION_RE.md` | 逆向主文档（§16 接力指南） |
+| `docs/逆向复盘-spade解密-20260604.md` | spade 解密逆向完整复盘 |
 
-## 凭证失效时
+> 逆向/调试工具（非日常使用）：`frida/hook_unwrap_ttm.py`、`grab_avdict_keys.py`、`tools/ghidra_scripts/*`。
 
-`config.json` 里的 `x-tt-token`/cookie 是登录态,长期有效但可能过期。
-失效后重新抓一次包(WireGuard模式, 见 git 历史/capture 目录), 跑 `extract_config.py` 更新。
+---
+
+## 常见问题
+
+- **search/API 卡死不返回**：旧版 `_oracle_lock` 死锁（已修为 `RLock`）。确认 `hongguo.py` 中是 `threading.RLock()`。
+- **`'Java' is not defined`**：frida 17 移除内置 Java bridge → 降到 frida 16.x（server + python 同版本）。
+- **下载的 mp4 打不开/花屏**：多半是 360–720p 的 **bytevc2** 需兼容解码器；改用默认 1080p（HEVC）。
+- **main_url 过期**（约 6h）：实时取，正常不受影响；批量很久没动可 `resume` 重取。
+- **凭证失效**：`config.json` 的 `x-tt-token`/cookie 过期，重抓包跑 `extract_config.py` 更新。
+- **签名入口失效**：app 大版本更新后 hook 类名可能变，需重新定位 `oracle.js`。
+
+---
 
 ## 局限
 
-- 依赖模拟器当签名机(app 必须运行)。app 大版本更新后签名入口类名可能变,需重新定位。
-- 视频直链(main_url)约6小时过期,但下载器是实时获取的,不受影响。
+- 取 `spade_a`+直链需模拟器跑 app 提供签名（解密本身离线）。
+- 低清晰度 bytevc2 播放需兼容解码器。
+- `spade` 目前为 ver1（纯字节变换）；代码里另有 ver2（`app_v2`/`web_v2`，AES-GCM-256+MD5(KEK)）当前红果视频未用，如出现需补 `unwrap_spade` 的 ver2 分支。
