@@ -53,7 +53,7 @@ class Oracle:
 
 
 _oracle = None
-_oracle_lock = threading.Lock()
+_oracle_lock = threading.RLock()  # RLock: sign()持锁内调oracle()会重入,Lock会死锁(Mac复盘②)
 def oracle():
     global _oracle
     if _oracle is None:

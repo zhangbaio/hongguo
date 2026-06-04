@@ -56,3 +56,12 @@ venv/
 capture/*.json
 capture/*.txt
 deploy/*.tar.gz
+
+capture/jadx_spade/
+capture/apk/
+capture/*.dex
+tools/jadx/
+tools/ghidra_12.1_PUBLIC/
+tools/jdk21/
+capture/*.mp4
+capture/*.h265

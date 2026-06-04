@@ -809,6 +809,7 @@ spade(37B)= a0bc2ef0628c25c768bc10f741bb3cea40920bd85aa523f573880ef447be3aee75a2
 - ⚠ 仓库历史里有多 GB 的 `capture/*.bin` 被跟踪（历史遗留），新增大文件请确认 .gitignore。
 
 ### 16.10 进度日志（按时间倒序追加）
+- **2026-06-04（完整一键工具打通）**：把 Mac 的 `offline_dl.py` 接到 Windows `hongguo.py`(API+签名)，做成 `搜索/榜单/选集→自动下载→纯离线解密→可播mp4`。修复 `hongguo.py` 死锁(Mac复盘②): `_oracle_lock` Lock→**RLock**(sign()持锁内调oracle()重入, 进程内frida签名必死锁; 之前search挂死167s即此)。**实证**: `python offline_dl.py series 7607003595136846872 1` → 全新剧《皇后她自带江山》第1集 → content key=e1ef2219.. (纯算法) + senc base_iv → 解密 5053/5053 → ffprobe HEVC 1080×1920/168s/抽帧成功。用法: `offline_dl.py search "剧名"` / `rank` / `series <id> [1-5]` / `vid <vid>`。签名仍需模拟器跑红果+frida16.x; 解密纯离线。
 - **2026-06-04（终极攻破，纯离线 spade→key 复现）**：Mac arm64(无Houdini,backtrace可用)上逆出真正的 unwrap = **`libttmplayer.so FUN_001c4550`**(ver1路径), 纯字节变换(XOR+POPCOUNT+位置相关+按首字节切片), **无KEK无AES**。定位法: hook `av_dict_set("decryption_key")`(在libttffmpeg)回溯, 整条栈在libttmplayer; base_iv从密文senc盒读。纯Python复现 unwrap_spade.py(5真值+独立e4对全命中)+offline_decrypt.py。**Windows实证**: offline_decrypt 用e4 spadeA+e4_match.mp4 → 5575/5575合法、ffprobe抽帧成功, 全程无app/keybox/frida。⇒ §16.6-B "内嵌KEK的AES在libavmdl"方向被证伪(真在libttmplayer且非AES)。ver2(app_v2/web_v2)走AES-GCM-256+MD5(KEK)当前未用。整合: 新增 unwrap_spade.py/decutil.py/offline_decrypt.py/hook_unwrap_ttm.py/grab_avdict_keys.py; 复盘 docs/逆向复盘-spade解密-20260604.md。
 - **2026-06-04（A0：现成工具在当前环境复验通过 + 性能实测 + 弯路纠正）**：
   - **目的**：接手后先验证 §14/§16 的解密工具链当前是否仍可用，再决定产品化。
