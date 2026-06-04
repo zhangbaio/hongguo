@@ -679,10 +679,18 @@ same_key_groups=1
 > 目的：不读完 §1–§15 也能快速接力。本节汇总「加密方案 / 完整逆向流程与关键节点 / 当前卡点 / 后续方向 / 文件清单 / 环境坑」。**后续每有进展，请在 §16.10 进度日志追加，并同步更新对应小节。**
 
 ### 16.0 一句话现状
-红果视频加密=**标准 CENC AES-128-CTR**，密码学层面**已完全攻破**（§14，`decrypt_full.py` 端到端解出可播视频）。
-通用下载器只差**每个视频拿到 `content key(16B)` + `base_iv64(8B)`**。两条路：
-- **(A) 运行时密钥盒预言机 + 全自动下载器 ✅ 已实时端到端打通**：`frida/downloader.py` 播放在线视频时一键 dump→提取 vid/main_url/kid→下载 CDN 密文→密文试解选 key+base_iv→输出可播 mp4。实证：1080p HEVC 全集解出、ffprobe 抽帧成功。见 §16.6-A。
-- **(B) 离线纯代码逆 `spade_a→key`**：理论可行（key 端上本地计算，非网络），但解包用**内嵌静态 KEK 的 AES**，藏在 6MB OLLVM 混淆的 libavmdl 里，**尚未定位到 KEK**。见 §16.6-B。
+红果视频加密=**标准 CENC AES-128-CTR**，密码学层面**已完全攻破**（§14）。
+
+**🎉🎉 2026-06-04 终极攻破：纯离线 `spade_a→content key` 已 100% 复现（无 KEK、无 AES、无 app/播放/frida）**
+- `content key` 由 `spade_a` 经 **`libttmplayer.so FUN_001c4550` 的纯字节变换**算出（XOR + POPCOUNT + 位置相关 + 按首字节 hex 值切片）。**根本不是 AES、没有 KEK**——这正是 §16.6-B 里所有 AES-KEK 暴力全失败的原因（方向错在 libavmdl + 假设 AES）。在 Mac arm64(无 Houdini→backtrace 可用) 上 hook `av_dict_set("decryption_key")` 回溯定位到。
+- `base_iv64` 直接从密文 mp4 的 **senc 盒**读（标准 CENC），不需要 keybox。
+- 纯 Python：`frida/unwrap_spade.py`(spade→key 算法, 5组真值+独立验证的 e4 对全命中) + `frida/offline_decrypt.py`(`spadeA+密文mp4→明文mp4`)。**Windows 实证**：e4 仅用 spade(base64)+密文文件 → 5575/5575 样本合法、ffprobe 抽帧成功。
+- 完整复盘见 **`docs/逆向复盘-spade解密-20260604.md`**。
+
+⇒ 现在通用下载器**只有签名一环还需 app**(取 spade_a + main_url 直链)，**解密完全离线纯 Python**。
+历史上的两条路（已被纯离线方案取代，保留作背景）：
+- **(A)** 运行时密钥盒预言机 `frida/downloader.py`（播放时 dump 内存提 key，已实时打通）—— 现不必，留作不便取 spade 时的备用。
+- **(B)** 曾假设 unwrap 是 libavmdl 内嵌静态 KEK 的 AES → **方向完全错**（实际在 libttmplayer 且是纯字节变换，无 AES）。见 §16.6-B 踩坑。
 
 ### 16.1 加密方案（完全确定）
 - 算法：**AES-128-CTR**，**全样本加密**（含每样本开头 4 字节 NAL 长度前缀也加密；CTR 原点=样本起点）。
@@ -801,6 +809,7 @@ spade(37B)= a0bc2ef0628c25c768bc10f741bb3cea40920bd85aa523f573880ef447be3aee75a2
 - ⚠ 仓库历史里有多 GB 的 `capture/*.bin` 被跟踪（历史遗留），新增大文件请确认 .gitignore。
 
 ### 16.10 进度日志（按时间倒序追加）
+- **2026-06-04（终极攻破，纯离线 spade→key 复现）**：Mac arm64(无Houdini,backtrace可用)上逆出真正的 unwrap = **`libttmplayer.so FUN_001c4550`**(ver1路径), 纯字节变换(XOR+POPCOUNT+位置相关+按首字节切片), **无KEK无AES**。定位法: hook `av_dict_set("decryption_key")`(在libttffmpeg)回溯, 整条栈在libttmplayer; base_iv从密文senc盒读。纯Python复现 unwrap_spade.py(5真值+独立e4对全命中)+offline_decrypt.py。**Windows实证**: offline_decrypt 用e4 spadeA+e4_match.mp4 → 5575/5575合法、ffprobe抽帧成功, 全程无app/keybox/frida。⇒ §16.6-B "内嵌KEK的AES在libavmdl"方向被证伪(真在libttmplayer且非AES)。ver2(app_v2/web_v2)走AES-GCM-256+MD5(KEK)当前未用。整合: 新增 unwrap_spade.py/decutil.py/offline_decrypt.py/hook_unwrap_ttm.py/grab_avdict_keys.py; 复盘 docs/逆向复盘-spade解密-20260604.md。
 - **2026-06-04（A0：现成工具在当前环境复验通过 + 性能实测 + 弯路纠正）**：
   - **目的**：接手后先验证 §14/§16 的解密工具链当前是否仍可用，再决定产品化。
   - **① 工具完好性（环境无关）**：`python frida/oracle.py --reuse capture/e4.bin --verify capture/e4_match.mp4`
