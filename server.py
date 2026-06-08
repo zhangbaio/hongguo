@@ -189,6 +189,40 @@ def ui():
     return FileResponse(os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "index.html"))
 
 
+@app.get("/img")
+def api_img(url: str):
+    """图片代理。红果封面常返回 HEIC，浏览器不支持时转成 JPEG。"""
+    from urllib.parse import urlparse
+    try:
+        raw = (url or "").strip()
+        u = urlparse(raw)
+        host = (u.hostname or "").lower()
+        allowed = u.scheme in ("http", "https") and any(host == h or host.endswith("." + h) for h in _IMG_HOSTS)
+        if not allowed:
+            raise HTTPException(400, "图片域名不允许")
+        cached = _img_cache.get(raw)
+        if cached is not None:
+            return Response(cached, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
+        r = requests.get(raw, timeout=30, verify=False, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        content_type = (r.headers.get("content-type") or "").lower()
+        data = r.content
+        if _IMG_OK and ("heic" in content_type or u.path.lower().endswith(".heic")):
+            img = Image.open(io.BytesIO(data))
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            out = io.BytesIO()
+            img.save(out, format="JPEG", quality=88, optimize=True)
+            data = out.getvalue()
+            _img_cache[raw] = data
+            return Response(data, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
+        return Response(data, media_type=content_type or "image/jpeg", headers={"Cache-Control": "max-age=86400"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(404, f"图片读取失败: {e}")
+
+
 # ---------------- 密钥管理(需 ADMIN_TOKEN) ----------------
 def _mask(k: str) -> str:
     return (k[:6] + "****" + k[-4:]) if len(k) > 12 else "****"
