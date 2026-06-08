@@ -262,48 +262,91 @@ def search(query, max_items=40):
     return results
 
 
-def get_episodes(series_id):
-    body = {"biz_param": {"detail_page_version": 0, "disable_digg_stat": False,
-                          "disable_video_relate_book": False, "image_shrink_datas_str": IMAGE_SHRINK,
-                          "need_all_video_definition": False, "need_mp4_align": False,
-                          "screen_width_px": "900", "source": 7, "use_os_player": False,
-                          "use_server_dns": False},
-            "series_id": str(series_id)}
-    ck = SG.cache_key("episodes", str(series_id))
-    cached = SG.cache_get(ck)
-    if cached is not None:
-        return cached
-    j = api("POST", "/novel/player/multi_video_detail/v1/", body=body)
-    data = j.get("data", {})
-    sid = str(series_id)
-    vd = data.get(sid, {}).get("video_data", {})
+def _episodes_body(series_id):
+    return {"biz_param": {"detail_page_version": 0, "disable_digg_stat": False,
+                           "disable_video_relate_book": False, "image_shrink_datas_str": IMAGE_SHRINK,
+                           "need_all_video_definition": False, "need_mp4_align": False,
+                           "screen_width_px": "900", "source": 7, "use_os_player": False,
+                           "use_server_dns": False},
+            "series_id": series_id}
+
+
+def _parse_episode_detail(sid, vd):
     eps = []
-    for e in vd.get("video_list", []):
+    for e in (vd or {}).get("video_list", []):
         eps.append({"index": e.get("vid_index"), "vid": e.get("vid"),
                     "title": e.get("title", "")[:30], "duration": e.get("duration"),
                     "cover": e.get("episode_cover") or e.get("cover") or "",
                     "comment_count": e.get("comment_count", 0),
                     "digged_count": e.get("digged_count", 0)})
     eps.sort(key=lambda x: x["index"] or 0)
+    first_ep_cover = next((e.get("cover") for e in eps if e.get("cover")), "")
     # 整剧元数据
     celebs = [{"演员": c.get("nickname"), "角色": c.get("role_name"),
                "头像": c.get("avatar"), "简介": (c.get("intro") or "")[:80]}
-              for c in vd.get("celebrities", [])]
+              for c in (vd or {}).get("celebrities", [])]
     meta = {
         "series_id": sid,
-        "title": vd.get("series_title", sid),
-        "intro": vd.get("series_intro", ""),
-        "episode_cnt": vd.get("episode_cnt", len(eps)),
-        "status": "完结" if vd.get("series_status") == 1 else "连载中",
-        "play_cnt": vd.get("series_play_cnt", 0),
-        "followed_cnt": vd.get("followed_cnt", 0),
-        "create_time": vd.get("create_time", 0),
-        "cover": vd.get("series_cover", ""),
-        "category": re.findall(r'"name":"([^"]+)"', vd.get("category_schema", "")),
+        "title": (vd or {}).get("series_title", sid),
+        "intro": (vd or {}).get("series_intro", ""),
+        "episode_cnt": (vd or {}).get("episode_cnt", len(eps)),
+        "status": "完结" if (vd or {}).get("series_status") == 1 else "连载中",
+        "play_cnt": (vd or {}).get("series_play_cnt", 0),
+        "followed_cnt": (vd or {}).get("followed_cnt", 0),
+        "create_time": (vd or {}).get("create_time", 0),
+        "cover": (vd or {}).get("series_cover") or first_ep_cover,
+        "category": re.findall(r'"name":"([^"]+)"', (vd or {}).get("category_schema", "")),
         "celebrities": celebs,
     }
+    return meta, eps
+
+
+def get_episodes(series_id):
+    sid = str(series_id)
+    ck = SG.cache_key("episodes", sid)
+    cached = SG.cache_get(ck)
+    if cached is not None:
+        return cached
+    j = api("POST", "/novel/player/multi_video_detail/v1/", body=_episodes_body(sid))
+    data = j.get("data", {})
+    meta, eps = _parse_episode_detail(sid, data.get(sid, {}).get("video_data", {}))
     SG.cache_set(ck, (meta, eps), ttl=21600)  # 剧集列表缓存6小时
     return meta, eps
+
+
+def get_episodes_batch(series_ids, batch_size=20):
+    """批量取剧集元数据。multi_video_detail 支持 series_id 用逗号拼接；实测 20 个/批稳定，30 个会参数错误。"""
+    ids, seen = [], set()
+    for sid in series_ids or []:
+        sid = str(sid).strip()
+        if sid and sid not in seen:
+            seen.add(sid)
+            ids.append(sid)
+    batch_size = max(1, min(int(batch_size or 20), 20))
+    out, failed = {}, []
+    todo = []
+    for sid in ids:
+        cached = SG.cache_get(SG.cache_key("episodes", sid))
+        if cached is not None:
+            out[sid] = cached[0]
+        else:
+            todo.append(sid)
+    for i in range(0, len(todo), batch_size):
+        batch = todo[i:i+batch_size]
+        try:
+            j = api("POST", "/novel/player/multi_video_detail/v1/", body=_episodes_body(",".join(batch)))
+            data = j.get("data", {}) or {}
+            for sid in batch:
+                vd = (data.get(sid) or {}).get("video_data") or {}
+                if not vd:
+                    failed.append({"series_id": sid, "error": "empty detail"})
+                    continue
+                meta, eps = _parse_episode_detail(sid, vd)
+                SG.cache_set(SG.cache_key("episodes", sid), (meta, eps), ttl=21600)
+                out[sid] = meta
+        except Exception as e:
+            failed.extend({"series_id": sid, "error": str(e)} for sid in batch)
+    return out, failed
 
 
 def get_video_urls(vids, force=False):

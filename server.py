@@ -16,7 +16,7 @@
   GET /stream?vid=xxx&quality=1080p       也可直接按 vid + 清晰度; 支持 Range 拖动; <video>用?api_key=
 """
 import re, os, io, time, threading, sys
-from fastapi import FastAPI, HTTPException, Query, Depends, Request
+from fastapi import FastAPI, HTTPException, Query, Depends, Request, Body
 from fastapi.responses import StreamingResponse, JSONResponse, Response, FileResponse
 import requests, urllib3
 import hongguo as H
@@ -330,6 +330,27 @@ def api_episodes(series_id: str):
         return {"meta": meta, "episodes": eps}
     except Exception as e:
         raise HTTPException(500, f"episodes失败: {e}")
+
+
+@app.post("/metrics/batch")
+def api_metrics_batch(payload: dict = Body(...)):
+    """批量补齐指标和封面。series_ids 每批最多20个拼接调用真实 multi_video_detail。"""
+    raw_ids = payload.get("series_ids") or payload.get("series_id") or []
+    if isinstance(raw_ids, str):
+        series_ids = [x.strip() for x in raw_ids.split(",") if x.strip()]
+    else:
+        series_ids = [str(x).strip() for x in raw_ids if str(x).strip()]
+    if not series_ids:
+        raise HTTPException(400, "series_ids不能为空")
+    if len(series_ids) > 200:
+        raise HTTPException(400, "series_ids最多200个")
+    batch_size = int(payload.get("batch_size") or 20)
+    try:
+        items, failed = H.get_episodes_batch(series_ids, batch_size=batch_size)
+        rows = [items[sid] for sid in series_ids if sid in items]
+        return {"count": len(rows), "items": rows, "failed": failed, "batch_size": max(1, min(batch_size, 20))}
+    except Exception as e:
+        raise HTTPException(500, f"metrics batch失败: {e}")
 
 
 @app.get("/play")
