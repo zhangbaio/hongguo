@@ -65,3 +65,11 @@ tools/ghidra_12.1_PUBLIC/
 tools/jdk21/
 capture/*.mp4
 capture/*.h265
+
+# ===== 大文件: 内存dump / 压缩包 / 下载的工具(绝不进git, 曾撑爆历史) =====
+capture/*.bin
+capture/*.gz
+capture/dl/
+tools/*.zip
+tools/ghidra_proj/
+.codex_*.json
