@@ -388,6 +388,43 @@ def get_video_urls(vids, force=False):
     return out
 
 
+def get_video_tracks(vids, force=False, batch_size=5):
+    """批量取每个vid的完整 video_list 轨道(含 main_url/backup_url/video_meta/encrypt_info.spade_a)。
+    与 get_video_urls 不同: 保留 spade_a(离线解密必需) 和全部清晰度轨道(供选清晰度)。
+    一次 5 个 vid(app 真实批量大小)→ 5 集只签 1 次, 大幅降签名/节流/风控压力。
+    按 vid 缓存 5h(main_url url_expire 约6h); force=True 跳过缓存(URL过期续传用)。
+    返回 {vid(str): [track,...]}; 未返回的 vid 不在结果里(调用方自行回退)。"""
+    out, todo, seen = {}, [], set()
+    for v in vids:
+        v = str(v)
+        if v in seen:
+            continue
+        seen.add(v)
+        c = None if force else SG.cache_get(SG.cache_key("vmtracks", v))
+        if c is not None:
+            out[v] = c
+        else:
+            todo.append(v)
+    bs = max(1, min(int(batch_size or 5), 5))
+    for i in range(0, len(todo), bs):
+        batch = todo[i:i+bs]
+        body = {"biz_param": {"detail_page_version": 0, "device_level": 3,
+                              "disable_digg_stat": False, "disable_video_relate_book": False,
+                              "need_all_video_definition": True, "need_mp4_align": False,
+                              "use_os_player": False, "use_server_dns": False, "video_platform": 1024},
+                "mixed_video_id_map": {"1": batch}}
+        j = api("POST", "/novel/player/multi_video_model/v1/", body=body)
+        for vid, v in (j.get("data") or {}).items():
+            vm = v.get("video_model")
+            if not vm:
+                continue
+            tracks = (json.loads(vm).get("video_list") or [])
+            if tracks:
+                out[str(vid)] = tracks
+                SG.cache_set(SG.cache_key("vmtracks", str(vid)), tracks, ttl=18000)
+    return out
+
+
 import uuid, datetime
 
 

@@ -100,10 +100,10 @@ def list_quals(vm):
                     m.get("codec_type") or t.get("codec_type"), (t.get("encrypt_info") or {}).get("encrypt")))
     return sorted(out, key=lambda x: int(re.sub(r"\D", "", x[0]) or 0))
 
-def _pick_track(vm, quality="best"):
-    """按清晰度选轨。quality: best(默认)/worst/1080p/720p/540p/480p/360p(或纯数字)。
+def _pick_track(tracks, quality="best"):
+    """按清晰度选轨。tracks: video_list 轨道列表。quality: best(默认)/worst/1080p/720p/540p/480p/360p(或纯数字)。
     指定清晰度不存在时取 <=请求 的最高一档(没有则最低)。返回 (track, 实际definition, 是否回退)。"""
-    tracks = vm.get("video_list", [])
+    tracks = tracks or []
     if not tracks:
         return None, None, False
     q = str(quality or "best").lower().strip()
@@ -121,8 +121,10 @@ def _pick_track(vm, quality="best"):
     t = le[-1] if le else avail[0]
     return t, _defn(t), True
 
-def dl_vid(vid, name=None, retries=2, quiet=False, quality="best"):
-    """下载+解密单集; 返回输出路径或 None。各集独立文件, 线程安全。quality 见 _pick_track。"""
+def dl_vid(vid, name=None, retries=2, quiet=False, quality="best", tracks=None):
+    """下载+解密单集; 返回输出路径或 None。各集独立文件, 线程安全。quality 见 _pick_track。
+    tracks: 预取的 video_list 轨道(批量签名得到); None 则自取。
+    首次用预取轨道(不再签名); 重试时强制重取直链(force, 处理 URL 过期)——仅失败集才重签。"""
     os.makedirs(OUT, exist_ok=True)
     name = H.sanitize(name or str(vid))
     out = os.path.join(OUT, name + ".mp4")
@@ -133,9 +135,9 @@ def dl_vid(vid, name=None, retries=2, quiet=False, quality="best"):
     last = None
     for attempt in range(retries):
         try:
-            vm = _video_model(vid)
-            if not vm: last = "无video_model"; continue
-            tr, gotdef, fallback = _pick_track(vm, quality)
+            tk = tracks if (tracks and attempt == 0) else H.get_video_tracks([vid], force=(attempt > 0)).get(str(vid))
+            if not tk: last = "无video_model"; continue
+            tr, gotdef, fallback = _pick_track(tk, quality)
             if not tr: last = "无video_list"; continue
             enc = tr.get("encrypt_info") or {}
             meta = tr.get("video_meta") or {}
@@ -169,7 +171,7 @@ class SeriesCtx:
     """一部剧的下载上下文: 状态/标题/集列表/清晰度 + 各自的状态锁。"""
     def __init__(self, sid, title, state, eps, quality):
         self.sid = sid; self.title = title; self.state = state; self.eps = eps
-        self.quality = quality; self.lock = threading.Lock()
+        self.quality = quality; self.lock = threading.Lock(); self.tracks = {}  # vid(str)->[track]
 
 
 def _prepare(series_id, rng, quality):
@@ -188,13 +190,20 @@ def _prepare(series_id, rng, quality):
     pending = [e for e in eps if not _is_done(st, e["index"])]
     log(f"《{title}》共 {meta.get('episode_cnt','?')} 集 | {meta['status']} | 目标 {len(eps)} | "
         f"跳过已完成 {len(eps)-len(pending)} | 待下 {len(pending)} | 清晰度 {quality}")
+    if pending:  # 批量预取直链(5集/签名, 保留spade_a)→ 之后并发池只做下载+解密(无签名)
+        try:
+            ctx.tracks = H.get_video_tracks([e["vid"] for e in pending])
+            log(f"  预取直链 {len(ctx.tracks)}/{len(pending)} 集 (批量签名~{(len(pending)+4)//5}次, 替代逐集{len(pending)}次)")
+        except Exception as ex:
+            log(f"  预取直链失败, 将逐集回退取流: {ex}")
     return ctx, pending, len(eps) - len(pending)
 
 
 def _episode_task(ctx, e):
     """下载+解密一集并更新该剧状态(线程安全, 增量落盘)。返回 bool 成功。"""
     idx = e["index"]
-    path = dl_vid(e["vid"], f"{ctx.title}_第{(idx or 0):03d}集", retries=2, quality=ctx.quality)
+    path = dl_vid(e["vid"], f"{ctx.title}_第{(idx or 0):03d}集", retries=2, quality=ctx.quality,
+                  tracks=ctx.tracks.get(str(e["vid"])))
     with ctx.lock:
         ent = ctx.state["episodes"].setdefault(str(idx), {"vid": e["vid"], "attempts": 0})
         ent["vid"] = e["vid"]; ent["attempts"] = ent.get("attempts", 0) + 1; ent["ts"] = int(time.time())
