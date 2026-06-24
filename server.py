@@ -37,7 +37,8 @@ def _vm_track(vid, quality="best"):
     vm = ODL._video_model(vid)
     if not vm:
         return None
-    tr, defn, _ = ODL._pick_track(vm, quality)
+    tracks = vm.get("video_list") if isinstance(vm, dict) else vm
+    tr, defn, _ = ODL._pick_track(tracks, quality)
     if not tr:
         return None
     enc = tr.get("encrypt_info") or {}
