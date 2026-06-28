@@ -668,6 +668,7 @@ def browse(genre="short_play", theme=None, setting=None, background=None,
             out.append({"series_id": sid, "title": it.get("title", ""),
                         "episode_cnt": it.get("episode_cnt", 0), "score": it.get("score", ""),
                         "play_cnt": it.get("play_cnt", 0), "cover": it.get("cover", ""),
+                        "copyright": it.get("copyright", ""),
                         "category": " / ".join(cats), "intro": (it.get("video_desc") or "")[:50]})
             if len(out) >= max_items:
                 break
