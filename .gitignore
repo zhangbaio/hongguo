@@ -73,3 +73,6 @@ capture/dl/
 tools/*.zip
 tools/ghidra_proj/
 .codex_*.json
+
+# ===== 临时数据 dump(脚本输出, 非代码) =====
+rec.json
