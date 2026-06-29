@@ -25,6 +25,7 @@ except Exception:
 import safeguards as SG
 from safeguards import RiskControlError, AuthExpiredError
 import downloader as DL
+import devicepool
 
 # ---------------- HTTP 层: 可选 curl_cffi 指纹伪装(JA3)+ 代理 ----------------
 # 仅作用于"对红果API / 字节CDN"的外部请求; 对本机签名服务(sign/grab)不伪装不走代理。
@@ -65,6 +66,14 @@ DEV = os.environ.get("ADB_DEVICE", "127.0.0.1:16384")
 FRIDA_HOST = os.environ.get("FRIDA_HOST", "127.0.0.1:27042")
 HOST = CFG["api_host"]
 OUT_DIR = os.path.join(HERE, "downloads")
+_pool = devicepool.load_pool(CFG["base_query"])   # 设备指纹池(DEVICE_POOL_SIZE>0 启用; 否则 None=单设备)
+
+
+def rotate_device():
+    """主动换下一台池设备(无池时无操作)。可在每部剧/每会话开始调用以分散身份。"""
+    if _pool:
+        return _pool.rotate()
+    return None
 
 # 详情接口 biz_param 里的图片缩放常量(抓包里的固定值)
 IMAGE_SHRINK = ("W3siaW1hZ2VfdHlwZSI6MywiaW1hZ2Vfd2lkdGgiOjkwMCwic2hyaW5rX3R5cGUiOjN9LHsiaW1h\n"
@@ -174,6 +183,8 @@ def refresh_session():
 
 def build_url(path, extra=None):
     q = dict(CFG["base_query"])
+    if _pool:                              # 设备池: 覆盖身份字段(device_id/iid/cdid/机型...)
+        q.update(_pool.current()["query"])
     if extra:
         q.update(extra)
     q["_rticket"] = str(int(time.time() * 1000))
@@ -184,6 +195,10 @@ def build_url(path, extra=None):
 def _api_once(method, path, body, extra_query):
     url = build_url(path, extra_query)
     headers = dict(CFG["session_headers"])
+    if _pool:                             # 池设备走游客: 用自洽 UA, 不带原账号 token/cookie
+        headers["user-agent"] = _pool.current()["user_agent"]
+        headers.pop("x-tt-token", None)
+        headers.pop("cookie", None)
     headers["content-type"] = "application/json; charset=utf-8"
     data = None
     if body is not None:

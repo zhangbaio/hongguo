@@ -85,3 +85,6 @@ capture/**/*.bin
 # 部署环境变量(真实密钥, 不入库)
 deploy/.env
 deploy/data/
+
+# 设备指纹池(生成的设备身份, 不入库)
+devices.json
