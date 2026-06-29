@@ -92,6 +92,34 @@ header 格式为 `key\r\nvalue\r\n…` 配对。
 
 > ⚠ 依赖 `base.apk`(125MB,gitignore;放 hongguo-mac/ 或传参指定路径)。
 
+### 里程碑④决定性发现(2026-06-29 续5):找到 fqnovel 专用 unidbg 范本 🎯
+
+**`zero199901/fqnovel-unidbg`**(`IdleFQ.java`)是 **fqnovel(红果同后端)专用的完整 metasec 签名实现**,针对 `com.dragon.read.oversea.gp`(番茄海外 6.8.1.32)。**强证据:它处理的 `MS.b` op `268435470` = 返回 `System.currentTimeMillis()`,正是本项目红果实测到的那个 op → 红果与番茄海外共用同族 libmetasec,范本可直接套用。**
+
+范本给全了之前缺的所有东西:
+- **类链**:`ms/bd/c/m ← ms/bd/c/a4$a ← com/bytedance/mobsec/metasec/ml/MS`(版本相关,见下"待提取")。
+- **签名调用**:`module.callFunction(emulator, 0x168c80, url, header)` → `memory.pointer(ret).getString(0)`;header 格式 `key\r\nvalue\r\n…`。
+- **`MS.b(op,…)` 完整 opcode 表**(`handleMSMethod`):
+  - `65539` → files 目录路径(`/data/user/0/<pkg>/files/.msdata`)
+  - `33554433`/`33554434` → boolean true
+  - `16777232` → Integer `68132`
+  - `16777233` → 版本号字符串(如 "6.8.1.32")
+  - **`16777218` → metasec 证书文件字节(`ms_16777218.bin`)**
+  - `268435470` → `System.currentTimeMillis()`(✅ 与红果实测 op 一致)
+- 其它回调:`Thread.getStackTrace`(真栈)、`getBytes`、`Long/Integer/Boolean.xxxValue`、`MS.a()V`→no-op、`getStaticIntField MS.a` → 0x40。
+- 依赖:`libc++_shared.so`、apk、rootfs、`inode/uid` 设置、IOResolver 重定向 so/apk 路径。
+
+### 最快落地路线(改用 fork fqnovel-unidbg)
+
+比从零写本工程更快:**fork `zero199901/fqnovel-unidbg`,把番茄海外的 4 个工件换成红果的**:
+1. **`libmetasec_ml.so`** → 红果的(已有 `capture/so/libmetasec_ml.so`)。
+2. **签名偏移 `0x168c80`** → 红果 .so 可能不同;先**直接试 0x168c80**(同族大概率一致或接近),不对再 RE 定位(找处理 url+header 产出头的函数)。
+3. **类链 `m/a4$a`** → 红果可能不同(本项目实测 native 在 `ms.bd.c.y2`);先试范本名,FindClass 失败则用红果实际混淆名。
+4. **metasec 证书(op 16777218 的 `ms_16777218.bin`)** → 需从红果 app 提取(assets/运行时 dump)。
+5. PACKAGE_NAME=`com.phoenix.read`、version=`7.2.2.32`、设备参数取 `config.json`。
+
+> 进度:env 初始化已通(里程碑④突破);剩余 = 上面 4 个红果专属工件的提取/校准。范本把"怎么做"全给了,剩纯提取工作。
+
 ## 路线图(后续里程碑)
 
 - **② 触发 native 注册 + 摸清 native 方法**:在 unidbg 里建 `MSManager`/`ms.bd.c.*` 的 DvmClass 并调用,
