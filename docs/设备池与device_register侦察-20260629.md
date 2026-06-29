@@ -77,6 +77,23 @@
 frida 备忘补充:`-n`(按名 attach)在本机 frida-server 枚举进程失败,只能 `-f` spawn;
 反复 spawn/native 枚举会把 frida CLI(Python)abort 崩,尽量用轻量 Java hook。
 
+### 三次突破(2026-06-29):离线加密 oracle 打通(不逆算法)
+
+不逆 TTEncrypt 算法,改用**与签名同款的 unidbg 跑库**思路直接调用加密函数:
+- 库 `libEncryptor.so`(83928B, stripped, 有 `JNI_OnLoad` 导出, **无 VM 保护**, 比 metasec 简单)。
+- 类 `com/bytedance/frameworks/encryptor/EncryptorUtil`(JNI 类名 XOR 0x73 加密, 解出),
+  方法 `ttEncrypt([BI)[B`(`byte[] ttEncrypt(byte[] data,int len)`)。
+- `unidbg-sign/.../EncryptRun.java`:加载库 + callJNI_OnLoad + `callStaticJniMethodObject("ttEncrypt([BI)[B",..)`。
+  **实测产出密文 magic `74 63 05 10`, 与真机 device_register body 一字不差。**`EncryptRun serve <port>` 常驻(POST 明文→密文)。
+
+**离线注册流程已搭通**(`明文JSON → unidbg加密 → tt_data=a POST → 签名`),但**返回 device_id 仍为 0**:
+- 加密体让响应从长变短(`{server_time,device_id:0,install_id:0}`,服务端按加密分支处理),
+  但 stub(明/密文)/content-type/有无签名/补字段 均无差别, 恒 0。
+- **高度怀疑是"新设备速率墙"**:本次在同一(机房非)IP 上猛灌数十次注册尝试, 服务端很可能已临时
+  禁止该 IP 铸造新设备 → 不论注册体对错都给 0(原始真实 device_id 仍正常 = 非整体封, 是新设备铸造被限)。
+- **未结**:需换干净 IP / 挂代理 / 冷却 后用 `EncryptRun`+`FqTrace` 重跑离线注册, 才能证伪"注册体是否正确"。
+  另注:libEncryptor 只有 ttEncrypt 无独立 decrypt, 无法用它解密真机密文来比对明文结构。
+
 ### 抓包环境备忘(复现用)
 - frida 17.9.6:**不能用 raw `create_script`**(`Java`/`Module.findExportByName` 全局已移除),用 `frida` CLI(自带桥接);后台跑需 `sleep N | frida ...` 保持 stdin 否则 REPL 读 EOF 即退;反复 spawn/attach 易把 frida CLI(Python)abort 崩。
 - 触发注册:`adb shell pm clear com.phoenix.read` → spawn → 点"同意并继续"(1080x2400 约 540,2076)→ 通知 Allow(约 540,1245)。
