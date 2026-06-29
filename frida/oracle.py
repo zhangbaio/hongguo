@@ -25,12 +25,16 @@ def _find(d, p, s=0, e=None):
     for t, o, sz, hs in _ib(d, s, e):
         if t == p[0]: return (o+hs, o+sz) if len(p) == 1 else _find(d, p[1:], o+hs, o+sz)
 def _u32(d, o): return struct.unpack(">I", d[o:o+4])[0]
-def parse_video_samples(path):
-    d = open(path, "rb").read()
-    mv = _find(d, [b"moov"]); traks = [(o+hs, o+sz) for t, o, sz, hs in _ib(d, *mv) if t == b"trak"]
-    def hdlr(tr): h = _find(d, [b"mdia", b"hdlr"], *tr); return d[h[0]+8:h[0]+12]
-    vt = [t for t in traks if hdlr(t) == b"vide"][0]
-    s, e = _find(d, [b"mdia", b"minf", b"stbl"], *vt)
+def parse_track_samples(d, handler=b"vide"):
+    """解析指定 handler 轨(vide/soun)的样本 (sizes, offs)。无此轨返回 ([], [])。
+    stsz/stco|co64/stsc → 文件内每样本字节偏移; 视频音频通用。"""
+    mv = _find(d, [b"moov"])
+    if not mv: return [], []
+    traks = [(o+hs, o+sz) for t, o, sz, hs in _ib(d, *mv) if t == b"trak"]
+    def hdlr(tr): h = _find(d, [b"mdia", b"hdlr"], *tr); return d[h[0]+8:h[0]+12] if h else None
+    want = [t for t in traks if hdlr(t) == handler]
+    if not want: return [], []
+    s, e = _find(d, [b"mdia", b"minf", b"stbl"], *want[0])
     stsz = _find(d, [b"stsz"], s, e); stco = _find(d, [b"stco"], s, e); co64 = _find(d, [b"co64"], s, e); stsc = _find(d, [b"stsc"], s, e)
     ss = _u32(d, stsz[0]+4); cnt = _u32(d, stsz[0]+8)
     sizes = [ss]*cnt if ss else [_u32(d, stsz[0]+12+4*i) for i in range(cnt)]
@@ -47,6 +51,10 @@ def parse_video_samples(path):
         for _ in range(spc[c]):
             if si >= cnt: break
             offs.append(off); off += sizes[si]; si += 1
+    return sizes, offs
+def parse_video_samples(path):
+    d = open(path, "rb").read()
+    sizes, offs = parse_track_samples(d, b"vide")
     return d, sizes, offs
 def _nal_ok(pt, sz):
     p = 0

@@ -18,7 +18,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import unwrap_spade
 import oracle
-from decutil import senc_iv8, decrypt_full, tenc_kid
+from decutil import senc_iv8, decrypt_full, decrypt_av, remux_playable, tenc_kid
 
 
 def offline_decrypt(spade_a_b64, ct_path, out_path=None, flag=0):
@@ -43,17 +43,28 @@ def offline_decrypt(spade_a_b64, ct_path, out_path=None, flag=0):
         print("[X] 密文无 senc base_iv")
         return None
 
-    # 3) key × base_iv 试解 (NAL 自证选出 video track 的 base_iv) -> 全解
+    # 3) NAL 自证确认 content key 正确 (顺带验证 video base_iv)
     kh, ivh = oracle.verify_key_iv(ct_path, [key], ivs)
     if not kh:
         print("[X] key 与密文不匹配 (spade 与该密文不对应? 或 ver2 视频?)")
         return None
-    print(f"[3/3] 命中 key={kh} base_iv64={ivh} -> 全解 ...")
-    ok, tot = decrypt_full(ct_path, kh, ivh, out_path)
-    if ok == tot:
-        print(f"\n✅ 纯离线解密成功: {out_path}  ({tot} 视频样本全部 NAL 合法)")
+    print(f"[3/3] key={kh} 校验通过 -> 全轨解密(视频+音频, 各用自身 senc base_iv)...")
+
+    # 4) 全轨解密(视频+音频)。先写中间密文->明文, 再重封装剥离 CENC 信令成可播 mp4
+    raw = os.path.splitext(out_path)[0] + ".raw.mp4"
+    stats = decrypt_av(ct_path, kh, raw)
+    v = stats.get("vide"); a = stats.get("soun")
+    clean = remux_playable(raw, out_path)
+    if clean:
+        try: os.remove(raw)
+        except OSError: pass
     else:
-        print(f"\n⚠ 完成但 {tot - ok}/{tot} 样本 NAL 异常 (音频track/清晰度差异?): {out_path}")
+        out_path = raw  # 无 ffmpeg: 退回未重封装的明文(宽松播放器可播)
+    note = []
+    if v: note.append(f"视频 {v[0]}/{v[1]} NAL 合法")
+    if a: note.append(f"音频 {a[1]} 样本已解")
+    flag_ok = (not v) or v[0] == v[1]
+    print(f"\n{'✅ 纯离线解密成功' if flag_ok else '⚠ 视频部分样本 NAL 异常'}: {out_path}  ({'; '.join(note)})")
     return out_path
 
 
