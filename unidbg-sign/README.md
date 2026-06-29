@@ -58,6 +58,23 @@
 **`MS.b(int op,int,long,String,Object):Object`** 是 metasec 的核心回调:native 用不同 op 向 Java 要环境信息
 (包名/签名/系统属性/设备参数 等)。当前仅 op=0x1000000E 在 init 期被调,返回 null 可过。
 
+### 里程碑④进展(2026-06-29 续3):metasec 接口面完全测绘
+
+反射枚举(`frida/enum_metasec_native.js`,attach 活红果)发现 metasec **整套 API 只有一个 native 入口**,对称 leviathan 设计:
+- **native 入口(Java→native)**:`ms.bd.c.y2.a(int op, int, long, String, Object) : Object` —— init/getReportRaw/frameSign 全走它,靠 `op` 分发。
+- **回调(native→Java)**:`com.bytedance.mobsec.metasec.ml.MS.b(int op, int, long, String, Object) : Object` —— native 反过来用它向 Java 要环境(包名/签名/系统属性/设备参数)。
+
+⇒ 在 unidbg 里驱动签名 = **调 `y2.a(op,…)` 走对 opcode 序列(init → getReportRaw),并实现 `MS.b(op,…)` 各 opcode 返回红果真实值**。
+
+**当前④卡点/下一步(多日 RE 主体):**
+1. `y2.a` 是惰性注册且 libmetasec 无 `Java_*` 符号、JNI_OnLoad 内也没 RegisterNatives(疑 metasec 绕 JNIEnv 表手动注册以反 hook)
+   → 需 **Ghidra 静态定位 `y2.a` 的 native 分发函数地址**(从 JNI_OnLoad/MS.b 引用链找),在 unidbg 里按地址直接调或手动 registerNatives。
+2. **逆 opcode 表**:init 用哪些 op、getReportRaw 用哪个 op、各 op 的入参/返回语义。
+3. **实现 `MS.b` 各 opcode**:喂红果真实环境(aid=8662、app_name=novelread、versionCode=72232、签名、设备参数取自 `config.json`)。
+4. 过后续可能的反调试/完整性自检 → 产出 X-Argus,与 Frida 预言机输出逐字段比对(里程碑⑥真值校验)。
+
+> 已实锤:库能在 unidbg 加载、JNI_OnLoad 初始化成功(无反模拟器 bail)、接口面=单 native 分发器 + 单回调。**地基与路线确定,剩余为 opcode 级 RE(按天计、中等成功率)。**
+
 ## 路线图(后续里程碑)
 
 - **② 触发 native 注册 + 摸清 native 方法**:在 unidbg 里建 `MSManager`/`ms.bd.c.*` 的 DvmClass 并调用,
