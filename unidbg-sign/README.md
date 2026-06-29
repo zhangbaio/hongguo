@@ -163,6 +163,15 @@ header 格式为 `key\r\nvalue\r\n…` 配对。
 
 > **里程碑④定论:除红果签名函数偏移外全部打通;该偏移因 metasec OLLVM 静态不可解,需动态 trace / .rodata 表匹配的专项 RE(数日级)。** 工程、文档、两个已分析的 Ghidra 工程、范本均已就绪可接力。
 
+### 🎉 里程碑⑤验证(2026-06-29 续9):harness 产出真签名(番茄海外端到端打通)
+
+`FqTrace.java`(番茄海外 6.8.1.32 配置 + capture/fq_oversea/ 工件)在本 unidbg 环境 **`callFunction(0x168c80, url, header)` 成功产出完整 metasec 签名**:
+`X-Argus / X-Gorgon / X-Helios / X-Khronos / X-Ladon / X-Medusa / X-Neptune / X-Soter`(七神齐全,X-Khronos=当前时间戳,均结构合法)。
+("SDK not init crashing" 为 benign 日志,不影响签名产出。)
+
+⇒ **整套 harness/回调/证书/类链方案被证明完全可行** —— 同款 metasec,红果**只差签名函数偏移**。
+现在有了**可跑通的番茄海外参照**,可用动态 trace 抓 .rodata 算法表 → 红果同表 xref → 反推红果偏移。
+
 ## 路线图(后续里程碑)
 
 - **② 触发 native 注册 + 摸清 native 方法**:在 unidbg 里建 `MSManager`/`ms.bd.c.*` 的 DvmClass 并调用,
