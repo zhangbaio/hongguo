@@ -3,6 +3,7 @@
 #   - 去掉 frida(服务器无设备, 签名走 unidbg SIGN_SERVER)/mitmproxy/paramiko
 #   - 补 pycryptodome(解密 AES-CTR 必需, 根清单遗漏)
 requests
+curl_cffi       # TLS/JA3 指纹伪装(IMPERSONATE);未装则透明回退 requests
 fastapi
 uvicorn[standard]
 pycryptodome

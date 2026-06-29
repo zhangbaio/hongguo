@@ -26,6 +26,36 @@ import safeguards as SG
 from safeguards import RiskControlError, AuthExpiredError
 import downloader as DL
 
+# ---------------- HTTP 层: 可选 curl_cffi 指纹伪装(JA3)+ 代理 ----------------
+# 仅作用于"对红果API / 字节CDN"的外部请求; 对本机签名服务(sign/grab)不伪装不走代理。
+#   IMPERSONATE   : curl_cffi impersonate 目标(如 chrome / chrome120 / chrome131_android)。
+#                   空字符串 = 禁用伪装, 退回原生 requests。
+#   HONGGUO_PROXY : 外部请求代理(http://host:port 或 socks5://user:pass@host:port)。空 = 直连。
+IMPERSONATE = os.environ.get("IMPERSONATE", "chrome")
+HONGGUO_PROXY = os.environ.get("HONGGUO_PROXY", "").strip()
+try:
+    from curl_cffi import requests as _cffi          # 指纹伪装(可选依赖)
+    _HAS_CFFI = True
+except Exception:
+    _cffi = None
+    _HAS_CFFI = False
+
+
+def _ext_proxies():
+    return {"http": HONGGUO_PROXY, "https": HONGGUO_PROXY} if HONGGUO_PROXY else None
+
+
+def http_request(method, url, **kw):
+    """对外部(红果/CDN)发请求: 自动注入 verify=False + 代理 + curl_cffi 指纹伪装(若可用)。
+    curl_cffi 未安装或 IMPERSONATE 为空 → 透明退回原生 requests(行为不变)。"""
+    kw.setdefault("verify", False)
+    if HONGGUO_PROXY:
+        kw.setdefault("proxies", _ext_proxies())
+    if _HAS_CFFI and IMPERSONATE:
+        kw.setdefault("impersonate", IMPERSONATE)
+        return _cffi.request(method, url, **kw)
+    return requests.request(method, url, **kw)
+
 urllib3.disable_warnings()
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG = json.load(open(os.path.join(HERE, "config.json"), encoding="utf-8"))
@@ -163,7 +193,7 @@ def _api_once(method, path, body, extra_query):
     headers.update(sec)
     headers.pop("accept-encoding", None)
     SG.throttle.wait()                    # 节流
-    r = requests.request(method, url, data=data, headers=headers, verify=False, timeout=30)
+    r = http_request(method, url, data=data, headers=headers, timeout=30)
     j = r.json()
     SG.check_response(j)                  # 风控/登录态识别
     return j
@@ -694,7 +724,7 @@ def img_ext(url):
 
 def download_image(url, path):
     try:
-        r = requests.get(url, verify=False, timeout=30)
+        r = http_request("GET", url, timeout=30)
         r.raise_for_status()
         with open(path, "wb") as f:
             f.write(r.content)
@@ -706,7 +736,8 @@ def download_image(url, path):
 
 def download_file(url, path):
     tmp = path + ".part"
-    with requests.get(url, stream=True, verify=False, timeout=60) as r:
+    r = http_request("GET", url, stream=True, timeout=60)
+    try:
         r.raise_for_status()
         total = int(r.headers.get("content-length", 0))
         done = 0
@@ -720,6 +751,9 @@ def download_file(url, path):
                     if pct != last_pct and pct % 10 == 0:  # 每10%打一次
                         print(f"    {pct}% ({done//1024}/{total//1024} KB)")
                         last_pct = pct
+    finally:
+        try: r.close()
+        except Exception: pass
     os.replace(tmp, path)
 
 

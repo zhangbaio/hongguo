@@ -93,6 +93,20 @@ curl -s "http://127.0.0.1:8000/search?q=亮亮就业&api_key=changeme-client-key
 | 签名吞吐不够 | 多开 `FqTrace serve 9099/9100/..`,`SIGN_SERVER` 填逗号分隔多地址(`hongguo.py` 自动轮询) |
 | 客户端密钥 | `POST /admin/keys`(带 `x-admin-token`)生成,或 `API_KEYS` 逗号分隔 |
 
+## 风控对抗(已内置,按需开启)
+
+`safeguards.py` 已有:令牌桶节流(含抖动)+ 多级缓存 + 风控码/关键词识别退避。
+`hongguo.py` 的外部请求层(对红果 API / 字节 CDN)额外支持两个环境变量(仅作用于外部请求,**不影响本机签名服务**):
+
+| 变量 | 作用 | 说明 |
+|------|------|------|
+| `IMPERSONATE` | TLS/JA3 指纹伪装 | 用 `curl_cffi` 把请求伪装成真 Chrome(贴近 app 的 cronet 网络栈),默认 `chrome`;空=退回原生 `requests`(指纹=Python/OpenSSL,易被识别);某些 curl_cffi 版本需写具体如 `chrome120` |
+| `HONGGUO_PROXY` | 外部请求走代理 | `http://host:port` 或 `socks5://user:pass@host:port`;不填=直连机房 IP。**机房 IP 是上云后最大破绽**,上量时建议配住宅/移动代理,且身份↔IP 保持稳定绑定 |
+
+> 提醒:这些只降低被识别概率,非隐身。**单设备/单 token 在机房 IP 上集中跑量**仍是最高风险;
+> 真要上量需「多 token+设备指纹池轮换 + 代理绑定」(本仓库暂未内置多账号池,需自行扩展 `config.json` 为多份轮换)。
+> CDN 视频下载经代理会吃代理带宽,按需评估。
+
 ## 安全 / 合规
 
 - 签名端口 9099 **绝不对外**,仅本机 API 调用;对外只暴露 443(nginx)。
