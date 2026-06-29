@@ -94,6 +94,28 @@ frida 备忘补充:`-n`(按名 attach)在本机 frida-server 枚举进程失败,
 - **未结**:需换干净 IP / 挂代理 / 冷却 后用 `EncryptRun`+`FqTrace` 重跑离线注册, 才能证伪"注册体是否正确"。
   另注:libEncryptor 只有 ttEncrypt 无独立 decrypt, 无法用它解密真机密文来比对明文结构。
 
+### 四次(2026-06-29):离线注册"通了一半"——精确定位剩余墙
+
+换干净本机 IP 重跑仍 device_id=0 → 排除速率墙, 是注册体/协议问题。逐项突破:
+- **ttEncrypt 固定 key**(同输入同输出), 算法稳定。
+- **wire 格式 = `ttEncrypt(gzip(JSON))`**:raw JSON 加密 → 短响应(服务端 gunzip 失败);
+  **gzip 后再加密 → 完整响应**(服务端成功解密+解压+解析)。gzip 是之前缺的关键步骤。
+- **决定性隔离测试 —— aid 1967(番茄海外)注册成功**:用匹配的 aid-1967 签名器 + 番茄海外参数
+  (versionCode 68132/6.8.1.32/com.dragon.read.oversea.gp)+ i18n 域名 `log.isnssdk.com`,
+  **返回真 device_id(如 7656821399541384725)+ install_id + new_user:1**。
+  → **离线注册管线完全正确**(拼明文→gzip→unidbg ttEncrypt→tt_data=a POST→FqTrace 签名)。
+- **红果 aid 8662 注册仍 0**:因 applog 网关(log.snssdk.com)**严格校验 X-Argus 内的 aid 必须=注册 aid**,
+  而我们签名器是番茄海外 aid 1967 → 不匹配 → 0。(内容接口 fqnovel.com 宽松, 跨 app 能蒙;applog 不行。)
+- **跨 app 设备不通**:新铸的 aid-1967 设备打红果内容 → 空 body(被拒)。
+  **红果内容要求设备是 aid-8662 注册的(设备对内容是 aid-绑定的, 与跨app签名不同)。**
+
+**最终精确结论**:离线注册红果设备 = 需要红果 **aid-8662 的 X-Argus 签名**(applog 严格验 aid)。
+这绕回了最初的 metasec 墙——当初只是"为内容跨 app 绕过"(fqnovel 宽松), 并未真正攻破 aid-8662 签名。
+要做红果设备池, 须先拿到 aid-8662 签名能力:① 找红果 libmetasec_ml.so 自己的 sign offset(原始难题),
+或 ② 提取红果 metasec 证书喂给番茄海外签名器并让其按 aid-8662 出签(需红果 cert/op 参数, 待验证)。
+**副产品**:番茄海外(Fizzo, aid 1967)设备可离线无限铸——若需 Fizzo 内容可直接用。
+推荐红果设备池仍走第五节"app 注册 grab 入池"省力路线, 除非攻破 aid-8662 签名。
+
 ### 抓包环境备忘(复现用)
 - frida 17.9.6:**不能用 raw `create_script`**(`Java`/`Module.findExportByName` 全局已移除),用 `frida` CLI(自带桥接);后台跑需 `sleep N | frida ...` 保持 stdin 否则 REPL 读 EOF 即退;反复 spawn/attach 易把 frida CLI(Python)abort 崩。
 - 触发注册:`adb shell pm clear com.phoenix.read` → spawn → 点"同意并继续"(1080x2400 约 540,2076)→ 通知 Allow(约 540,1245)。

@@ -8,12 +8,16 @@
   java ... com.hongguo.sign.FqTrace   serve 9099   # 签名
   java ... com.hongguo.sign.EncryptRun serve 9100   # 加密(ttEncrypt)
 
-现状: 加密 oracle 已验证(密文 magic 74 63 与真机一致), 但服务端返回 device_id=0。
-      高度怀疑是"新设备速率墙"(同 IP 灌太多新设备被临时限铸)。
-      → 换干净 IP / 挂代理 / 冷却后重跑本脚本验证注册体是否正确。
-用法: python device_register_offline.py   (读同目录 config.json 的设备字段)
+现状(已验证): 管线完全正确 —— aid 1967(番茄海外)注册成功返回真 device_id。
+  但红果 aid 8662 仍 device_id=0: applog 网关严格校验 X-Argus 内 aid 必须=注册 aid,
+  而 FqTrace 签名器是番茄海外 aid 1967 → 不匹配。要注册红果设备须先拿到 aid-8662 签名能力。
+  另: 新铸的 aid-1967 设备跨 app 打红果内容会被拒(设备对内容是 aid-绑定的)。
+  详见 docs/设备池与device_register侦察-20260629.md 第四节。
+wire 格式: body = ttEncrypt(gzip(JSON)), tt_data=a。
+用法: python device_register_offline.py   (读同目录 config.json; 默认 aid 来自 config=红果8662→会得0)
+  番茄海外(aid1967)可成功的参数见 docs。
 """
-import json, time, hashlib, uuid, random, os, requests, urllib3
+import json, gzip, time, hashlib, uuid, random, os, requests, urllib3
 urllib3.disable_warnings()
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG = json.load(open(os.path.join(HERE, "config.json"), encoding="utf-8"))
@@ -51,7 +55,8 @@ def register(device=None):
         "device_id": 0, "install_id": 0,
     }, "_gen_time": int(time.time() * 1000)}
     plain = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
-    cipher = requests.post(ENC, data=plain, timeout=60).content
+    # wire 格式 = ttEncrypt(gzip(JSON)); gzip 不可省(服务端先 gunzip)
+    cipher = requests.post(ENC, data=gzip.compress(plain), timeout=60).content
     assert cipher[:2] == b"\x74\x63", "加密失败 magic=%s" % cipher[:4].hex()
     stub = hashlib.md5(cipher).hexdigest().upper()
     qd = {"aid": d["aid"], "device_platform": "android", "channel": d["channel"],
