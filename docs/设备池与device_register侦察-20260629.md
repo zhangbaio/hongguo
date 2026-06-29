@@ -137,6 +137,27 @@ frida 备忘补充:`-n`(按名 attach)在本机 frida-server 枚举进程失败,
 - 触发注册:`adb shell pm clear com.phoenix.read` → spawn → 点"同意并继续"(1080x2400 约 540,2076)→ 通知 Allow(约 540,1245)。
 - 抓包脚本:`frida/cap_all.js`(广捕 URL + service2 body)、`frida/hook_ttencrypt.js`(待定位正确加密库)。
 
-## 五、可选替代路线(若不啃离线注册)
+## 五、务实方案(已实现并验证):grab → devices.json 设备池
 
-复用现有 app 环境:本地正常注册 N 台(清数据/多实例)→ `/grab` 各自 `device_id/iid/cdid/klink_egdi` 等 → 填进 `devices.json`。池子立即用上**合法**设备,完全不碰离线注册。
+把真 app 注册的合法设备 grab 进设备池。**已端到端验证**:grab 的真设备 + 游客 + 跨 app 签名 →
+红果搜索 `code=0`(过内容墙)。
+
+工具:
+- `frida/grab_device.js`:hook retrofit Request, dump 带 device_id 的请求 {url, headers}(base64 JSON, 多条)。
+- `grab_device.py`:attach 运行中红果(按 PID 比 -n 稳), 合并多条请求的 query+headers 取全设备字段
+  (device_id/iid/cdid/klink_egdi/device_brand/device_type/resolution/os_*/rom_version/channel);
+  retrofit $init 阶段无 UA → 按设备字段构造自洽 UA; 去重追加 `devices.json`。
+
+工作流(攒 N 台):
+```bash
+# 0. frida-server 运行(adb root 后启动); 红果已过隐私同意
+# 1. 每台新设备: app 清数据并重新同意(或多开实例)→ 铸一台真设备
+adb shell pm clear com.phoenix.read   # 启动 app 点同意, 让它注册
+# 2. grab 入池(重启 app 制造请求爆发更易抓全字段):
+python grab_device.py --out <hongguo运行目录>/devices.json
+# 重复 1-2 攒多台
+# 3. 启用: hongguo.py 同目录有 devices.json 即自动轮换(devicepool.load_pool)
+```
+注意:同模拟器注册的设备共享硬件指纹(device_type 等), 仅 device_id/iid/cdid/klink_egdi 不同;
+更强多样性需多设备/多实例。`devices.json` 已 gitignore。
+关键修正:`hongguo.py` 仅在池设备 UA 非空时才覆盖 UA(空 UA 会被拒)。

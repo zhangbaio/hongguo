@@ -196,7 +196,9 @@ def _api_once(method, path, body, extra_query):
     url = build_url(path, extra_query)
     headers = dict(CFG["session_headers"])
     if _pool:                             # 池设备走游客: 用自洽 UA, 不带原账号 token/cookie
-        headers["user-agent"] = _pool.current()["user_agent"]
+        _ua = _pool.current().get("user_agent")
+        if _ua:
+            headers["user-agent"] = _ua
         headers.pop("x-tt-token", None)
         headers.pop("cookie", None)
     headers["content-type"] = "application/json; charset=utf-8"
