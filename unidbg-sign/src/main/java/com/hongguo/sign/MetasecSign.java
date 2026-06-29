@@ -1,109 +1,186 @@
 package com.hongguo.sign;
 
 import com.github.unidbg.AndroidEmulator;
+import com.github.unidbg.Emulator;
 import com.github.unidbg.Module;
+import com.github.unidbg.file.FileResult;
+import com.github.unidbg.file.IOResolver;
+import com.github.unidbg.file.linux.AndroidFileIO;
 import com.github.unidbg.linux.android.AndroidEmulatorBuilder;
 import com.github.unidbg.linux.android.AndroidResolver;
 import com.github.unidbg.linux.android.dvm.*;
 import com.github.unidbg.linux.android.dvm.array.ArrayObject;
+import com.github.unidbg.linux.android.dvm.array.ByteArray;
 import com.github.unidbg.linux.android.dvm.wrapper.DvmBoolean;
+import com.github.unidbg.linux.file.SimpleFileIO;
 import com.github.unidbg.memory.Memory;
+import com.github.unidbg.pointer.UnidbgPointer;
+import com.github.unidbg.virtualmodule.android.AndroidModule;
+import com.github.unidbg.virtualmodule.android.JniGraphics;
 
 import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 
 /**
- * 红果(com.phoenix.read, aid=8662) metasec 脱机签名 —— 仿 dy233_unidbg_sign 范本适配。
- * 关键:① 真实类链 ms/bd/c/k ← a0 ← MS;② createDalvikVM 带 base.apk;③ 回调喂红果真值。
- * 里程碑④:先让 JNI_OnLoad + init 在带 apk/真类链下尽量往前,记录 MS.b 各 opcode。
+ * 红果(com.phoenix.read)metasec 脱机签名 —— 移植 zero199901/fqnovel-unidbg(IdleFQ)适配红果。
+ * 先用番茄海外的类链(m/a4$a)+偏移(0x168c80)试跑,观察红果实际 FindClass/卡点。
  */
-public class MetasecSign extends AbstractJni {
+public class MetasecSign extends AbstractJni implements IOResolver<AndroidFileIO> {
 
     static final String PKG = "com.phoenix.read";
     static final String VER = "7.2.2.32";
-    static final String FILES_DIR = "/data/user/0/com.phoenix.read/files";
+    static final String FILES = "/data/user/0/com.phoenix.read/files";
+    static final long SIGN_OFFSET = 0x168c80;   // 番茄海外偏移,先试
 
     private final AndroidEmulator emulator;
     private final VM vm;
     private final Module module;
     private final Memory memory;
+    private final File soMeta;
+    private File certFile; // op 16777218
 
-    public MetasecSign(File apk, File so) {
+    public MetasecSign(File soMeta, File soCpp, File cert) {
+        this.soMeta = soMeta;
+        this.certFile = cert;
         emulator = AndroidEmulatorBuilder.for64Bit()
                 .setProcessName(PKG)
                 .build();
         emulator.getSyscallHandler().setVerbose(false);
+        emulator.getSyscallHandler().addIOResolver(this);
+        java.util.Map<String, Integer> inode = new java.util.HashMap<>();
+        inode.put("/data/user/0/com.phoenix.read", 655781);
+        inode.put("/data/user/0/com.phoenix.read/files", 655864);
+        emulator.set("inode", inode);
+        emulator.set("uid", 10174);
+
         memory = emulator.getMemory();
         memory.setLibraryResolver(new AndroidResolver(23));
-        memory.setCallInitFunction(true);
 
-        vm = (apk != null && apk.exists()) ? emulator.createDalvikVM(apk) : emulator.createDalvikVM();
+        vm = emulator.createDalvikVM();
         vm.setJni(this);
         vm.setVerbose(true);
+        new AndroidModule(emulator, vm).register(memory);
+        new JniGraphics(emulator, vm).register(memory);
 
-        // 真实类链(范本:k ← a0 ← MS)
-        DvmClass k = vm.resolveClass("ms/bd/c/k");
-        DvmClass a0 = vm.resolveClass("ms/bd/c/a0", k);
-        vm.resolveClass("com/bytedance/mobsec/metasec/ml/MS", a0);
+        if (soCpp != null && soCpp.exists()) vm.loadLibrary(soCpp, false);
 
-        DalvikModule dm = vm.loadLibrary(so, true);   // true → 调 JNI_OnLoad
+        // 类链(番茄海外:m ← a4$a ← MS);红果若不同,FindClass 日志会暴露真实名
+        DvmClass m = vm.resolveClass("ms/bd/c/m");
+        DvmClass a4a = vm.resolveClass("ms/bd/c/a4$a", m);
+        vm.resolveClass("com/bytedance/mobsec/metasec/ml/MS", a4a);
+
+        DalvikModule dm = vm.loadLibrary(soMeta, true);
         module = dm.getModule();
-        System.out.println("[*] loaded base=0x" + Long.toHexString(module.base) + " JNI_OnLoad 完成");
+        dm.callJNI_OnLoad(emulator);
+        System.out.println("[*] init 完成 base=0x" + Long.toHexString(module.base));
     }
 
-    // native→Java 实例方法回调(反调试:伪造调用栈)
-    @Override
-    public DvmObject<?> callObjectMethodV(BaseVM vm, DvmObject<?> dvmObject, String signature, VaList vaList) {
-        switch (signature) {
-            case "java/lang/Thread->getStackTrace()[Ljava/lang/StackTraceElement;":
-                return new ArrayObject(
-                        vm.resolveClass("java/lang/StackTraceElement").newObject("dalvik.system.VMStack"),
-                        vm.resolveClass("java/lang/StackTraceElement").newObject("java.lang.Thread"));
+    public String sign(String url, String header) {
+        Number n = module.callFunction(emulator, SIGN_OFFSET, url, header);
+        if (n == null) return null;
+        UnidbgPointer p = memory.pointer(n.longValue());
+        return p == null ? null : p.getString(0);
+    }
+
+    private DvmObject<?> handleMS(BaseVM vm, int op) {
+        switch (op) {
+            case 65539:    return new StringObject(vm, FILES + "/.msdata");
+            case 33554433:
+            case 33554434: return DvmBoolean.valueOf(vm, true);
+            case 16777232: return vm.resolveClass("java/lang/Integer").newObject(72232); // 红果 versionCode
+            case 16777233: return new StringObject(vm, VER);
+            case 16777218:
+                try {
+                    if (certFile != null && certFile.exists())
+                        return new ByteArray(vm, Files.readAllBytes(certFile.toPath()));
+                } catch (Exception e) {}
+                System.out.println("    [MS.b op=16777218 证书] 暂无,返回 null");
+                return null;
+            case 268435470: return vm.resolveClass("java/lang/Long").newObject(System.currentTimeMillis());
+            default:
+                System.out.println("    [MS.b 未处理 op=" + op + " 0x" + Integer.toHexString(op) + "]");
+                return null;
         }
-        System.out.println("    [callObjectMethodV] " + signature);
-        return super.callObjectMethodV(vm, dvmObject, signature, vaList);
     }
 
-    // metasec 的 native→Java 分发器 MS.b + 其它静态回调
     @Override
-    public DvmObject<?> callStaticObjectMethodV(BaseVM vm, DvmClass dvmClass, String signature, VaList vaList) {
-        if (signature.startsWith("com/bytedance/mobsec/metasec/ml/MS->b(")) {
-            int op = vaList.getIntArg(0);
-            switch (op) {
-                // 范本 dy233 的 op(版本不同可能不命中,留作参考)
-                case 65539:      return new StringObject(vm, FILES_DIR + "/;o@Y0f");
-                case 33554433:   return DvmBoolean.valueOf(vm, Boolean.TRUE);
-                case 33554434:   return DvmBoolean.valueOf(vm, Boolean.TRUE);
-                case 16777233:   return new StringObject(vm, VER);
-                default:
-                    System.out.println("    [MS.b] 未知 op=" + op + " (0x" + Integer.toHexString(op) + ") → 暂返回 null");
-                    return null;
+    public DvmObject<?> callStaticObjectMethodV(BaseVM vm, DvmClass c, String sig, VaList va) {
+        if (sig.equals("com/bytedance/mobsec/metasec/ml/MS->b(IIJLjava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;"))
+            return handleMS(vm, va.getIntArg(0));
+        if (sig.equals("java/lang/Thread->currentThread()Ljava/lang/Thread;"))
+            return vm.resolveClass("java/lang/Thread").newObject(Thread.currentThread());
+        return super.callStaticObjectMethodV(vm, c, sig, va);
+    }
+
+    @Override
+    public DvmObject<?> callObjectMethodV(BaseVM vm, DvmObject<?> o, String sig, VaList va) {
+        switch (sig) {
+            case "java/lang/Thread->getStackTrace()[Ljava/lang/StackTraceElement;": {
+                StackTraceElement[] es = Thread.currentThread().getStackTrace();
+                DvmObject[] a = new DvmObject[es.length];
+                for (int i = 0; i < es.length; i++) a[i] = vm.resolveClass("java/lang/StackTraceElement").newObject(es[i]);
+                return new ArrayObject(a);
             }
+            case "java/lang/StackTraceElement->getClassName()Ljava/lang/String;":
+                return new StringObject(vm, ((StackTraceElement) o.getValue()).getClassName());
+            case "java/lang/StackTraceElement->getMethodName()Ljava/lang/String;":
+                return new StringObject(vm, ((StackTraceElement) o.getValue()).getMethodName());
+            case "java/lang/Thread->getBytes(Ljava/lang/String;)[B":
+                return new ByteArray(vm, ((String) va.getObjectArg(0).getValue()).getBytes(StandardCharsets.UTF_8));
         }
-        switch (signature) {
-            case "java/lang/Thread->currentThread()Ljava/lang/Thread;":
-                return vm.resolveClass("java/lang/Thread").newObject(Thread.currentThread());
-        }
-        System.out.println("    [callStaticObjectMethodV] " + signature);
-        return super.callStaticObjectMethodV(vm, dvmClass, signature, vaList);
+        return super.callObjectMethodV(vm, o, sig, va);
     }
 
     @Override
-    public void callStaticVoidMethodV(BaseVM vm, DvmClass dvmClass, String signature, VaList vaList) {
-        if (signature.equals("com/bytedance/mobsec/metasec/ml/MS->a()V")) return;
-        System.out.println("    [callStaticVoidMethodV] " + signature);
-        super.callStaticVoidMethodV(vm, dvmClass, signature, vaList);
+    public long callLongMethodV(BaseVM vm, DvmObject<?> o, String sig, VaList va) {
+        if ("java/lang/Long->longValue()J".equals(sig) && o.getValue() instanceof Long) return (Long) o.getValue();
+        return super.callLongMethodV(vm, o, sig, va);
+    }
+
+    @Override
+    public int callIntMethodV(BaseVM vm, DvmObject<?> o, String sig, VaList va) {
+        if ("java/lang/Integer->intValue()I".equals(sig) && o.getValue() instanceof Integer) return (Integer) o.getValue();
+        return super.callIntMethodV(vm, o, sig, va);
+    }
+
+    @Override
+    public boolean callBooleanMethodV(BaseVM vm, DvmObject<?> o, String sig, VaList va) {
+        if ("java/lang/Boolean->booleanValue()Z".equals(sig) && o.getValue() instanceof Boolean) return (Boolean) o.getValue();
+        return super.callBooleanMethodV(vm, o, sig, va);
+    }
+
+    @Override
+    public int getStaticIntField(BaseVM vm, DvmClass c, String sig) {
+        if ("com/bytedance/mobsec/metasec/ml/MS->a()V".equals(sig)) return 0x40;
+        return super.getStaticIntField(vm, c, sig);
+    }
+
+    @Override
+    public void callVoidMethod(BaseVM vm, DvmObject<?> o, String sig, VarArg va) {
+        if ("com/bytedance/mobsec/metasec/ml/MS->a()V".equals(sig)) return;
+        super.callVoidMethod(vm, o, sig, va);
+    }
+
+    @Override
+    public FileResult resolve(Emulator emu, String pathname, int oflags) {
+        if (pathname.contains("libmetasec_ml.so"))
+            return FileResult.success(new SimpleFileIO(oflags, soMeta, pathname));
+        return null;
     }
 
     public static void main(String[] args) {
-        File apk = new File(args.length > 0 ? args[0] : "/Users/zhangbiao/Documents/编程/ai/claude/hongguo-mac/base.apk");
-        File so = new File(args.length > 1 ? args[1] : "../capture/so/libmetasec_ml.so");
-        if (!so.exists()) { System.err.println("找不到 so: " + so.getAbsolutePath()); return; }
-        System.out.println("[*] apk=" + (apk.exists() ? apk.getName() : "(无,用空VM)") + " so=" + so.getName());
+        File meta = new File("../capture/so/libmetasec_ml.so");
+        File cpp = new File("../capture/so/libc++_shared.so");
+        File cert = new File("../capture/ms_cert/ms_16777218.bin"); // 红果证书(待提取)
+        if (!meta.exists()) { System.err.println("缺 libmetasec_ml.so"); return; }
         try {
-            new MetasecSign(apk.exists() ? apk : null, so);
-            System.out.println("[*] 里程碑④:JNI_OnLoad/init 在真类链下跑通(看上面 MS.b opcode)");
-        } catch (Throwable t) {
-            System.out.println("[!] 卡点:"); t.printStackTrace(System.out);
-        }
+            MetasecSign s = new MetasecSign(meta, cpp.exists()?cpp:null, cert.exists()?cert:null);
+            String url = "https://api5-normal-sinfonlinea.fqnovel.com/novel/player/multi_video_model/v1/?aid=8662&device_platform=android";
+            String header = "x-ss-stub\r\nD41D8CD98F00B204E9800998ECF8427E\r\ncontent-type\r\napplication/json; charset=utf-8";
+            System.out.println("[*] 试签名...");
+            String sig = s.sign(url, header);
+            System.out.println("[*] 签名结果 = " + sig);
+        } catch (Throwable t) { System.out.println("[!] 卡点:"); t.printStackTrace(System.out); }
     }
 }

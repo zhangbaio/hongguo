@@ -120,6 +120,21 @@ header 格式为 `key\r\nvalue\r\n…` 配对。
 
 > 进度:env 初始化已通(里程碑④突破);剩余 = 上面 4 个红果专属工件的提取/校准。范本把"怎么做"全给了,剩纯提取工作。
 
+### 里程碑④再突破(2026-06-29 续6):harness 全移植,跑进红果签名函数内部
+
+把 IdleFQ 完整移植进 `MetasecSign`(红果 libmetasec_ml.so + libc++_shared.so + 类链 + 全套回调),实跑结果:
+- ✅ **类链 `MS ← ms/bd/c/a4$a ← ms/bd/c/m` 红果完全适用**(与番茄海外同名!`GetSuperClass(MS)→a4$a→m`)。
+- ✅ **native 注册成功**:`RegisterNatives(ms/bd/c/m, a(IIJLjava/lang/String;Ljava/lang/Object;)…)` @ `libmetasec+0x26e684`。
+- ✅ **init 完成**,FindClass(Long) 等回调正常。
+- ✅ **`callFunction(0x168c80,url,header)` 落在红果可执行代码、签名开始执行**(进入 OLLVM 控制流),
+  最终 `br x9` 读到未映射地址崩 —— 因为 **0x168c80 是番茄海外(6.8.1.32)的偏移,红果(7.2.2.32)是不同 build,落点偏进了函数中段**。
+
+⇒ **唯一剩余 = 红果自己的签名函数入口偏移**(其余全部通用!证书 op 16777218 暂返回 null 也跑到了 sign 阶段)。
+两个 .so 都在手(`capture/so/libmetasec_ml.so` 红果 / fqu 资源里番茄海外),可**二进制对比定位**:
+- 番茄海外 sign 入口 = 0x168c80;提取其特征(prologue / 算法常量如 `0x0a021040`),在红果 .so 搜同特征 → 红果偏移。
+- 或 Ghidra 找处理 url+header、调 m.a 分发、产出头的函数。
+- 备选:不用直接偏移,改调已注册的 `m.a(op,…)` 分发器(需红果签名 opcode)。
+
 ## 路线图(后续里程碑)
 
 - **② 触发 native 注册 + 摸清 native 方法**:在 unidbg 里建 `MSManager`/`ms.bd.c.*` 的 DvmClass 并调用,
