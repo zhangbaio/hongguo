@@ -29,6 +29,19 @@
   应返回 null/0。属 unidbg 版本处理细节,**非反模拟器**。
 - 结论:**这条路能往下走**,是标准的 unidbg "逐个补 env 回调" 迭代(每修一个暴露下一个)。
 
+### 里程碑③进展(2026-06-29 续)
+
+- 升级 unidbg **0.9.8 → 0.9.9**(JitPack;最新版,2026-03)。给 MS 注册 Object 父类后:
+  `GetSuperClass(MS)→Object` ✅,推进到 `GetSuperClass(java/lang/Object)`。
+- **确认这是 unidbg 的有意设计**(读 0.9.9 源码 `DalvikVM64._GetSuperclass`):当目标类是 `java/lang/Object`
+  **或** `getSuperclass()==null 时,直接 `throw BackendException`,而不返回 0**。
+  但 metasec 在真机上依赖 `GetSuperClass(Object)==null` 来**终止类继承链遍历**(完整性自检),所以这里必须返回 0。
+- ⇒ **当前硬卡点 = metasec-on-unidbg 的已知摩擦:GetSuperClass 到 Object 时 unidbg 抛异常,需改 unidbg 行为。**
+
+**两条解法(择一,均需真功夫):**
+- **(a) fork/patch unidbg 源码**:把 `_GetSuperclass` 对 Object/null 改成 `return 0`,本地 `mvn install` 自建 unidbg 依赖。一行改动但要建 unidbg(含 unicorn/dynarmic 原生件)。
+- **(b) 运行时 SVC hook**:取 JNIEnv 函数表,把 GetSuperclass 槽(JNINativeInterface 索引 10,偏移 0x50)替换成自定义 `Arm64Svc`(返回注册的父类,null→0)。不改 unidbg 但要手搓 JNIEnv 表 patch。
+
 下一步候选:① 升级 unidbg 版本(新版 `GetSuperClass(Object)→0` 已处理);② 或自定义 DalvikVM 覆盖 GetSuperClass 对 Object 返回 0。
 过了继承链遍历后,预计依次遇到:`GetMethodID`/`RegisterNatives`/读 `/proc/self/maps`/`getPackageName`/签名校验 等回调,逐个喂红果真实值。
 

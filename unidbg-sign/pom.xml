@@ -28,7 +28,7 @@
         <dependency>
             <groupId>com.github.zhkl0228.unidbg</groupId>
             <artifactId>unidbg-android</artifactId>
-            <version>0.9.8</version>
+            <version>0.9.9</version>
         </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
