@@ -172,6 +172,20 @@ header 格式为 `key\r\nvalue\r\n…` 配对。
 ⇒ **整套 harness/回调/证书/类链方案被证明完全可行** —— 同款 metasec,红果**只差签名函数偏移**。
 现在有了**可跑通的番茄海外参照**,可用动态 trace 抓 .rodata 算法表 → 红果同表 xref → 反推红果偏移。
 
+### 动态 trace 结果(2026-06-29 续10):harness 产真签名 ✅;但表匹配被 VM 保护挡住
+
+`FqTrace` 加内存读 hook,trace 番茄海外 sign 运行时对 libmetasec 的读取:
+- 找到热读区(疑似算法表):`+0x2a2970..0x2a37fc`(932点)、`+0x2a3b00..0x2a4944`(914点)等。
+- **但这些区字节(`f500a232 f580a054…`)在红果 .so 里 0 命中** —— 它们是 **metasec VM 的字节码/加密表,build 专属**(VM 保护核心),**不是 build 不变的标准 crypto 表**。⇒ 表匹配定位红果偏移**也失败**。
+
+**结论:metasec 的 OLLVM+VM 保护把"静态反编译"和"数据表跨 build 匹配"两条都封死了。** 找红果偏移只剩最硬的两条:
+1. **devirtualize metasec VM**(还原 VM 解释器 + 找 sign 入口),数日级专家活;
+2. **逆 m.a opcode**:红果已注册 native `m.a`@0x26e684,找签名 opcode + 参数布局,直接调 m.a(也需深逆)。
+
+> **里程碑⑤定论:unidbg harness 已证明能产出真 metasec 七神签名(番茄海外端到端);红果同款,差且仅差签名入口偏移;该偏移被 metasec VM 保护封死静态/表匹配两路,需 VM 级深逆(最高难度档)。这是 metasec 逆向公认的天花板。**
+
+> 备选务实方案(非脱机):redroid/模拟器跑红果 app 当无人值守签名服务(Frida 预言机已就绪,见主仓 `frida/oracle.js`)。
+
 ## 路线图(后续里程碑)
 
 - **② 触发 native 注册 + 摸清 native 方法**:在 unidbg 里建 `MSManager`/`ms.bd.c.*` 的 DvmClass 并调用,

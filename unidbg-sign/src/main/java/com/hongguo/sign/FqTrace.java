@@ -66,11 +66,46 @@ public class FqTrace extends AbstractJni implements IOResolver<AndroidFileIO> {
         System.out.println("[*] 番茄海外 init 完成 base=0x" + Long.toHexString(module.base));
     }
 
+    static final java.util.Map<Long, Integer> READS = new java.util.HashMap<>();
+    private long modBase, modSize;
+
+    private void enableReadTrace() {
+        modBase = module.base; modSize = module.size;
+        emulator.getBackend().hook_add_new(new com.github.unidbg.arm.backend.ReadHook() {
+            public void hook(com.github.unidbg.arm.backend.Backend b, long addr, int size, Object u) {
+                if (addr >= modBase && addr < modBase + modSize) READS.merge(addr, 1, Integer::sum);
+            }
+            public void onAttach(com.github.unidbg.arm.backend.UnHook unHook) {}
+            public void detach() {}
+        }, modBase, modBase + modSize, null);
+    }
+
     public String sign(String url, String header) {
         Number n = module.callFunction(emulator, SIGN, url, header);
         if (n == null) return null;
         UnidbgPointer p = memory.pointer(n.longValue());
         return p == null ? null : p.getString(0);
+    }
+
+    public void reportHotReads(int topN) {
+        // 按读取次数排序,打印 libmetasec 内部(.rodata)最热地址 = 算法表
+        java.util.List<java.util.Map.Entry<Long, Integer>> es = new java.util.ArrayList<>(READS.entrySet());
+        es.sort((a, b) -> b.getValue() - a.getValue());
+        System.out.println("[*] 热读地址 top" + topN + "(off=相对libmetasec, cnt=次数):");
+        for (int i = 0; i < Math.min(topN, es.size()); i++)
+            System.out.printf("    +0x%-8x cnt=%d%n", es.get(i).getKey() - modBase, es.get(i).getValue());
+        // 找连续簇(表):按 off 排序,输出读>=20次的地址的 off 范围
+        es.sort(java.util.Map.Entry.comparingByKey());
+        long start = -1, prev = -1; int cnt = 0;
+        System.out.println("[*] 热读连续区(疑似表, off 范围):");
+        for (java.util.Map.Entry<Long, Integer> e : es) {
+            if (e.getValue() < 10) continue;
+            long off = e.getKey() - modBase;
+            if (start < 0) { start = off; prev = off; cnt = 1; }
+            else if (off - prev <= 64) { prev = off; cnt++; }
+            else { if (cnt >= 4) System.out.printf("    +0x%x .. +0x%x (%d点)%n", start, prev, cnt); start = off; prev = off; cnt = 1; }
+        }
+        if (cnt >= 4) System.out.printf("    +0x%x .. +0x%x (%d点)%n", start, prev, cnt);
     }
 
     private DvmObject<?> handleMS(BaseVM vm, int op) {
@@ -138,11 +173,12 @@ public class FqTrace extends AbstractJni implements IOResolver<AndroidFileIO> {
 
     public static void main(String[] args) {
         FqTrace t = new FqTrace();
+        t.enableReadTrace();
         String url = "https://api5-normal-sinfonlinec.fqnovel.com/reading/bookapi/search/tab/v?aid=1967&device_id=4223674528607515&iid=4223674528611611&version_code=68132&query=test";
         String header = "x-ss-req-ticket\r\n1754299673613\r\ncontent-type\r\napplication/json";
-        System.out.println("[*] 番茄海外 试签名...");
+        System.out.println("[*] 番茄海外 试签名(带读trace)...");
         String sig = t.sign(url, header);
-        System.out.println("[*] 签名结果:");
-        System.out.println(sig);
+        System.out.println("[*] 签名 X-Gorgon 行:" + (sig != null && sig.contains("X-Gorgon") ? "有" : "无"));
+        t.reportHotReads(30);
     }
 }
