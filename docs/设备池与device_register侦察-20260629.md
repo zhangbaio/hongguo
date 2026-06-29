@@ -58,6 +58,25 @@
 
 **外加结构性约束**:注册本身也要 IP 分散——同 IP 批量注册新设备同样触发风控。
 
+### 后续结论(2026-06-29 二次)
+
+1. **抓明文不可行(Java 层)**:红果 applog 是 **native Rust**(`libapplog_rust.so`/`libiesapplogger.so`),
+   device_register 的 JSON **在 native 组装+加密,从不以 Java 字符串/对象存在**。实测无 Java `ttEncrypt`
+   方法;hook `org.json.JSONObject.toString` / `String([B])` 均零捕获。body 加密(`ttEncrypt`)是
+   libEncryptor 里 RegisterNatives 注册的 OLLVM 混淆 native。→ 要明文只能逆 native(大工程)。
+2. **明文注册测试不通(确定性)**:用公开 applog schema + config.json 设备字段拼出明文注册体
+   (1325 字节,比真实 1110 还全),明文 POST `log.snssdk.com/service/2/device_register/`:
+   服务端**接受并解析(HTTP 200,返回标准响应结构),但 device_id 恒为 0**;加签名/加 sig_hash
+   (`56a962410c494bbaf0b58dba20cae56f`)/补全字段均无差别。**唯一差异变量是 body 加密**——
+   服务端只对 `tt_data=a` 加密体真正分配 device_id,明文一律给 0。
+   → **离线 device_register 必须复刻 native TTEncrypt 加密,无捷径。**
+
+**最终判断**:离线注册 = 逆 native 加密(libEncryptor ttEncrypt / Rust applog),研究级工作量,
+本阶段不划算。**推荐走第五节"抓真实注册设备入池"**:用本地 app 正常注册 N 台、grab 设备字段填
+`devices.json`,设备池立即用上合法设备,完全不碰离线注册。
+frida 备忘补充:`-n`(按名 attach)在本机 frida-server 枚举进程失败,只能 `-f` spawn;
+反复 spawn/native 枚举会把 frida CLI(Python)abort 崩,尽量用轻量 Java hook。
+
 ### 抓包环境备忘(复现用)
 - frida 17.9.6:**不能用 raw `create_script`**(`Java`/`Module.findExportByName` 全局已移除),用 `frida` CLI(自带桥接);后台跑需 `sleep N | frida ...` 保持 stdin 否则 REPL 读 EOF 即退;反复 spawn/attach 易把 frida CLI(Python)abort 崩。
 - 触发注册:`adb shell pm clear com.phoenix.read` → spawn → 点"同意并继续"(1080x2400 约 540,2076)→ 通知 Allow(约 540,1245)。
