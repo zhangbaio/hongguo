@@ -176,6 +176,8 @@ GET /browse?genre=ai_series&theme=玄幻&setting=逆袭&sort=hot_score&days=7&st
 | `start_oracle.ps1` | 一键启动签名环境 |
 | `docs/VIDEO_DECRYPTION_RE.md` | 逆向主文档（§16 接力指南） |
 | `docs/逆向复盘-spade解密-20260604.md` | spade 解密逆向完整复盘 |
+| `docs/DOUYIN_BOARD_RE.md` | 抖音短剧榜接口逆向复现手册（公开接口直采） |
+| `docs/KUAISHOU_BOARD_RE.md` | 快手短剧榜接口逆向复现手册（拉 KRN bundle 读源码） |
 
 > 逆向/调试工具（非日常使用）：`frida/hook_unwrap_ttm.py`、`grab_avdict_keys.py`、`tools/ghidra_scripts/*`。
 
