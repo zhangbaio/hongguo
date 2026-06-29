@@ -7,7 +7,48 @@
 > 背景:解密已 100% 离线(见 `docs/VIDEO_DECRYPTION_RE.md`);**唯一还需 App 的就是这一步签名**。
 > 难度:`docs/REVERSE_ENGINEERING.md §7` 评估为"数天、中等成功率"(metasec OLLVM+VM+反模拟器)。本工程是其落地。
 
-## 当前状态(2026-06-29)
+## 🎉 已攻克(2026-06-29):跨 app 签名链路
+
+**红果脱机签名达成 —— 走的不是"破红果自己的 VM",而是"用同后端的番茄海外签名器跨 app 签名"。**
+
+关键发现:红果(aid 8662)和番茄海外(`com.dragon.read.oversea.gp`, aid 1967)**共用 fqnovel.com 后端**,
+而 fqnovel 网关**只验签名本身有效,不做 app↔证书的强绑定校验**。所以可以:
+
+1. 用 `FqTrace`(番茄海外 metasec,已知 offset `0x168c80`,在 unidbg 里能产真签名)给**红果的 API 请求**签名;
+2. 带红果自己的 token/设备参数(`config.json`)发给红果 API → 服务器**认**。
+
+实测对照(`/reading/bookapi/search/tab/v`):
+
+| 请求 | 结果 |
+|------|------|
+| 红果请求 **无签名** | HTTP 200 但 **body 空** → 网关静默拦截(证明签名必需) |
+| 红果请求 **+番茄海外跨app签名** | `code=0`,179KB 真实数据 ✅ |
+| `multi_video_model` **+跨app签名** | `code=0`,返回 **1080p 真实 CDN 直链**(实拉首段 = 标准 MP4 `ftypisom`)✅ |
+
+**端到端验证:`hongguo.py` 零改动**,仅把 `SIGN_SERVER` 指向本工程的常驻签名服务,
+即可 `search → get_episodes → multi_video_model → 下载视频字节` 全程脱离红果 app / frida。
+
+### 常驻签名服务(给 hongguo.py)
+
+```bash
+mvn -DskipTests package
+# 启动(协议同原 frida 签名服务:POST /sign {url, headers} → {X-Argus,...})
+java --add-opens java.base/java.lang=ALL-UNNAMED \
+  -cp target/unidbg-sign-1.0-jar-with-dependencies.jar com.hongguo.sign.FqTrace serve 9099
+
+# hongguo.py 端(另开终端):
+export SIGN_SERVER="http://127.0.0.1:9099"
+python hongguo.py search "皇后还乡"
+python hongguo.py download <series_id> 1-3
+```
+
+> 依赖物(gitignore,不入库):`../capture/fq_oversea/` 下的番茄海外 `libmetasec_ml.so`、`libc++_shared.so`、
+> 证书 `ms_16777218.bin`(取自 zero199901/fqnovel-unidbg)。
+> 注:红果自身 build 的 metasec sign offset 仍未定位(OLLVM+VM 防静态),但**已无需**——跨 app 链路绕过了它。
+
+---
+
+## 历史:直攻红果自身 VM(已被跨app链路取代,存档)
 
 - ✅ **里程碑①:工程跑通,`libmetasec_ml.so` 加载 + `JNI_OnLoad` 干净执行,无崩溃**(`base=0x40000000`)。
   - `libandroid.so` 依赖缺失是 unidbg 正常提示(用不到)。

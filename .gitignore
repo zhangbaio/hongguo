@@ -76,3 +76,8 @@ tools/ghidra_proj/
 
 # ===== 临时数据 dump(脚本输出, 非代码) =====
 rec.json
+
+# 逆向二进制依赖物(unidbg 签名器用,不入库)
+capture/fq_oversea/
+capture/ms_cert/
+capture/**/*.bin

@@ -171,8 +171,76 @@ public class FqTrace extends AbstractJni implements IOResolver<AndroidFileIO> {
         return null;
     }
 
-    public static void main(String[] args) {
+    /** 把 sign() 的 "X-Argus\nval\nX-Gorgon\nval..." 解析成有序 Map(给 HTTP/JSON 用)。 */
+    public java.util.Map<String, String> signMap(String url, String header) {
+        java.util.LinkedHashMap<String, String> m = new java.util.LinkedHashMap<>();
+        String sig = sign(url, header);
+        if (sig == null) return m;
+        String[] lines = sig.split("\n");
+        for (int i = 0; i + 1 < lines.length; i += 2)
+            if (lines[i].startsWith("X-")) m.put(lines[i].trim(), lines[i + 1].trim());
+        return m;
+    }
+
+    /** 常驻签名服务:POST /sign {"url":..,"headers":{..}} → {"X-Argus":..}。协议同原 frida 签名服务,
+     *  hongguo.py 只需把 SIGN_SERVERS 指向本服务即可彻底脱离红果 app。模拟器单线程,签名串行加锁。 */
+    private void serve(int port) throws Exception {
+        final Object lock = new Object();
+        com.sun.net.httpserver.HttpServer srv = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress(port), 0);
+        srv.createContext("/sign", ex -> {
+            byte[] resp;
+            try {
+                byte[] in = readAll(ex.getRequestBody());
+                com.alibaba.fastjson.JSONObject req = com.alibaba.fastjson.JSON.parseObject(new String(in, StandardCharsets.UTF_8));
+                String url = req.getString("url");
+                com.alibaba.fastjson.JSONObject hs = req.getJSONObject("headers");
+                StringBuilder hb = new StringBuilder();
+                if (hs != null) for (String k : hs.keySet()) {
+                    if (hb.length() > 0) hb.append("\r\n");
+                    hb.append(k).append("\r\n").append(hs.getString(k));
+                }
+                java.util.Map<String, String> sig;
+                synchronized (lock) { sig = signMap(url, hb.toString()); }
+                resp = com.alibaba.fastjson.JSON.toJSONString(sig).getBytes(StandardCharsets.UTF_8);
+            } catch (Throwable t) {
+                resp = ("{\"error\":\"" + String.valueOf(t.getMessage()).replace('"', '\'') + "\"}").getBytes(StandardCharsets.UTF_8);
+            }
+            ex.getResponseHeaders().add("Content-Type", "application/json");
+            ex.sendResponseHeaders(200, resp.length);
+            ex.getResponseBody().write(resp);
+            ex.close();
+        });
+        srv.setExecutor(null);
+        srv.start();
+        System.out.println("[*] unidbg 离线签名服务已启动: http://127.0.0.1:" + port + "/sign (Ctrl-C 停止)");
+    }
+
+    private static byte[] readAll(java.io.InputStream is) throws java.io.IOException {
+        java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[4096]; int n;
+        while ((n = is.read(buf)) > 0) bo.write(buf, 0, n);
+        return bo.toByteArray();
+    }
+
+    public static void main(String[] args) throws Exception {
         FqTrace t = new FqTrace();
+        // 服务模式:serve [port] → 常驻 HTTP 签名服务(给 hongguo.py 的 SIGN_SERVERS)
+        if (args.length >= 1 && args[0].equals("serve")) {
+            int port = args.length >= 2 ? Integer.parseInt(args[1]) : 9090;
+            t.serve(port);
+            Thread.currentThread().join();
+            return;
+        }
+        // 命令行模式:args[0]=url, args[1]=header(\r\n分隔 key/value) → 输出签名头(给红果API试签)
+        if (args.length >= 1) {
+            String url = args[0];
+            String header = args.length >= 2 ? args[1].replace("\\r\\n", "\r\n") : "";
+            String sig = t.sign(url, header);
+            System.out.println("===SIG_START===");
+            System.out.println(sig);
+            System.out.println("===SIG_END===");
+            return;
+        }
         t.enableReadTrace();
         String url = "https://api5-normal-sinfonlinec.fqnovel.com/reading/bookapi/search/tab/v?aid=1967&device_id=4223674528607515&iid=4223674528611611&version_code=68132&query=test";
         String header = "x-ss-req-ticket\r\n1754299673613\r\ncontent-type\r\napplication/json";
