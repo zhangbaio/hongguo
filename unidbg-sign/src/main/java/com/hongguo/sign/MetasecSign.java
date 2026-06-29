@@ -10,8 +10,13 @@ import com.github.unidbg.file.linux.AndroidFileIO;
 import com.github.unidbg.linux.android.AndroidEmulatorBuilder;
 import com.github.unidbg.linux.android.AndroidResolver;
 import com.github.unidbg.linux.android.dvm.AbstractJni;
+import com.github.unidbg.linux.android.dvm.BaseVM;
 import com.github.unidbg.linux.android.dvm.DalvikModule;
+import com.github.unidbg.linux.android.dvm.DvmClass;
+import com.github.unidbg.linux.android.dvm.DvmMethod;
+import com.github.unidbg.linux.android.dvm.DvmObject;
 import com.github.unidbg.linux.android.dvm.VM;
+import com.github.unidbg.linux.android.dvm.VaList;
 import com.github.unidbg.memory.Memory;
 
 import java.io.File;
@@ -58,6 +63,21 @@ public class MetasecSign extends AbstractJni implements IOResolver<AndroidFileIO
         } else {
             System.out.println("[*] JNI_OnLoad 返回正常版本号 → 若上面无 RegisterNatives,则 native 为惰性注册(首次调用时)");
         }
+    }
+
+    // metasec 的 native→Java 回调分发器 MS.b(int op,int,long,String,Object):先日志看 opcode
+    @Override
+    public DvmObject<?> callStaticObjectMethodV(BaseVM vm, DvmClass dvmClass, DvmMethod dvmMethod, VaList vaList) {
+        if ("b".equals(dvmMethod.getMethodName())) {
+            int op = vaList.getIntArg(0);
+            int a1 = vaList.getIntArg(1);
+            long a2 = vaList.getLongArg(2);
+            DvmObject<?> a3 = vaList.getObjectArg(3);
+            System.out.println("    [MS.b] op=" + op + " a1=" + a1 + " a2=" + a2
+                    + " a3=" + (a3 == null ? "null" : a3.getValue()) + "  sig=" + dvmMethod.getSignature());
+            return null; // 暂返回 null,观察后续是否继续/还要什么
+        }
+        return super.callStaticObjectMethodV(vm, dvmClass, dvmMethod, vaList);
     }
 
     // 记录所有文件访问(反模拟器探测点);返回 null = 交回 unidbg 默认处理

@@ -25,8 +25,9 @@
     </repositories>
 
     <dependencies>
+        <!-- Maven Central 的 unidbg(groupId 不带 .unidbg);本地 install 的打补丁版覆盖它 -->
         <dependency>
-            <groupId>com.github.zhkl0228.unidbg</groupId>
+            <groupId>com.github.zhkl0228</groupId>
             <artifactId>unidbg-android</artifactId>
             <version>0.9.9</version>
         </dependency>

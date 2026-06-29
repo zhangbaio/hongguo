@@ -45,6 +45,19 @@
 下一步候选:① 升级 unidbg 版本(新版 `GetSuperClass(Object)→0` 已处理);② 或自定义 DalvikVM 覆盖 GetSuperClass 对 Object 返回 0。
 过了继承链遍历后,预计依次遇到:`GetMethodID`/`RegisterNatives`/读 `/proc/self/maps`/`getPackageName`/签名校验 等回调,逐个喂红果真实值。
 
+### 里程碑③完成(2026-06-29 续2)🎉
+
+- **解法(a) 落地**:克隆 unidbg v0.9.9 源码,把 `DalvikVM64._GetSuperclass` 对 `java/lang/Object`/null 父类
+  从 `throw BackendException` 改为 `return 0`(符合 JNI 规范);**用 JDK 8(Zulu 8)编译**(JDK17+ 会 `Module` 歧义),
+  `mvn install -pl unidbg-api,unidbg-android`(删父 pom 的 central-publishing 插件)→ 打补丁版 0.9.9 进本地 m2,backend 原生件用 Maven Central 的。
+- 本工程 pom 依赖改为 Maven Central groupId `com.github.zhkl0228:unidbg-android:0.9.9`(本地打补丁版覆盖)。
+- **结果:`JNI_OnLoad` 完整跑通,返回 `0x10006`(JNI_VERSION_1_6)= 成功!metasec 库在 unidbg 里初始化无反模拟器 bail。**
+- 链路:`FindClass(MS)` → 类链遍历(补丁过)→ **`MS.b(op=0x1000000E,…)` 回调**(metasec 的 native→Java 分发器)→ 我先返回 null,JNI_OnLoad 即成功返回。
+- natives = **惰性注册**(JNI_OnLoad 内无 RegisterNatives;首次调具体 native 方法时才注册)。
+
+**`MS.b(int op,int,long,String,Object):Object`** 是 metasec 的核心回调:native 用不同 op 向 Java 要环境信息
+(包名/签名/系统属性/设备参数 等)。当前仅 op=0x1000000E 在 init 期被调,返回 null 可过。
+
 ## 路线图(后续里程碑)
 
 - **② 触发 native 注册 + 摸清 native 方法**:在 unidbg 里建 `MSManager`/`ms.bd.c.*` 的 DvmClass 并调用,
