@@ -135,6 +135,21 @@ header 格式为 `key\r\nvalue\r\n…` 配对。
 - 或 Ghidra 找处理 url+header、调 m.a 分发、产出头的函数。
 - 备选:不用直接偏移,改调已注册的 `m.a(op,…)` 分发器(需红果签名 opcode)。
 
+### 里程碑④收口现状(2026-06-29 续7):仅差红果签名偏移,需 Ghidra
+
+二进制对比尝试(`find_sign_offset.py`,capstone):
+- 番茄海外 0x168c80 处函数**前缀字节在红果 0 命中**(OLLVM 跨 build 帧布局不同,预期)。
+- 番茄海外 0x168c80 **wrapper 开头不加载大常量**(真正带算法常量的 crypto 在更深层调用),故线性反汇编的常量聚类**定位不到**。
+- 已确认 vaddr==文件偏移(红果 `file[0x168c7c]=2c0300b9` 与运行时反汇编一致)。
+
+⇒ **结论:定位红果签名函数入口偏移需要 Ghidra**(对 4MB OLLVM .so 做 CFG/反编译;线性 capstone 不够)。这是剩余唯一阻塞,且是 RE 专项活。
+
+**找红果偏移的两条 Ghidra 路:**
+1. 反编译番茄海外 0x168c80,看它的特征(调用链/字符串 xref/参数处理),在红果 .so 找对应函数;两 .so 都在手可对照。
+2. 反编译红果已注册的 `m.a`@0x26e684 分发器,跟踪"取签名/报文"的 opcode 分支 → 找到内部 sign 函数;或直接在 unidbg 里调 `m.a(op,…)`(需该 opcode)。
+
+> **当前完成度:除"红果签名函数偏移"外全部打通**(env/类链/native注册/init/回调/sign 执行入口全验证)。拿到偏移后 `sign(url,header)` 即可出 X-Argus(证书 op 16777218 若必需再补提取)。这是 metasec unidbg 工程的"最后一公里",需 Ghidra 专项。
+
 ## 路线图(后续里程碑)
 
 - **② 触发 native 注册 + 摸清 native 方法**:在 unidbg 里建 `MSManager`/`ms.bd.c.*` 的 DvmClass 并调用,
