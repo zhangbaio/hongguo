@@ -150,6 +150,19 @@ header 格式为 `key\r\nvalue\r\n…` 配对。
 
 > **当前完成度:除"红果签名函数偏移"外全部打通**(env/类链/native注册/init/回调/sign 执行入口全验证)。拿到偏移后 `sign(url,header)` 即可出 X-Argus(证书 op 16777218 若必需再补提取)。这是 metasec unidbg 工程的"最后一公里",需 Ghidra 专项。
 
+### Ghidra 这一关结果(2026-06-29 续8):静态被 OLLVM 击败,转动态/数据表 xref
+
+- Ghidra 12.1.1(brew)+ JDK17 可用;两个 .so 各 ~90s 分析入库(`/tmp/ghidra_proj` 的 `fq_meta`/`hg_meta`),工具脚本 `ghidra/decomp.java`(反编译+callees+xref)。
+- 番茄海外 sign 入口 `0x168c80`(`FUN_00268c80`)= 小混淆 wrapper:读栈金丝雀 → 调 `FUN_00268ce4(buf)` → 间接调 `(ret+0x38)()`;`0x168c80` 被 `0x168c54` 调用。
+- **OLLVM 使 Ghidra 反编译失效**:`FUN_00268ce4` 反编译成 `return unaff_x30;`(垃圾),满屏 "Could not recover jumptable / indirect jump"。**静态反编译定位红果对应函数走不通**。
+
+**剩余可行路线(均为深度 RE,需专门时间):**
+1. **动态 trace(最可行)**:番茄海外 sign 在 unidbg 已跑通(fqu harness)→ 开 `emulator.traceCode()` 跑一次,记录运行时真实执行到的函数/常量/数据表地址(运行时绕过 OLLVM 静态混淆)。
+2. **.rodata 算法表 xref(最稳)**:从 trace 找 sign 用的 **crypto 查找表/S-box(.rodata,build 不变)** → 在红果 .so 搜同字节 → Ghidra 找 xref → 红果 sign 函数 → 回推入口偏移。
+3. 备选:动态在 unidbg 里对红果 m.a(@0x26e684)驱动签名 opcode(需逆 opcode)。
+
+> **里程碑④定论:除红果签名函数偏移外全部打通;该偏移因 metasec OLLVM 静态不可解,需动态 trace / .rodata 表匹配的专项 RE(数日级)。** 工程、文档、两个已分析的 Ghidra 工程、范本均已就绪可接力。
+
 ## 路线图(后续里程碑)
 
 - **② 触发 native 注册 + 摸清 native 方法**:在 unidbg 里建 `MSManager`/`ms.bd.c.*` 的 DvmClass 并调用,
