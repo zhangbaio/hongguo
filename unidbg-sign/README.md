@@ -75,6 +75,23 @@
 
 > 已实锤:库能在 unidbg 加载、JNI_OnLoad 初始化成功(无反模拟器 bail)、接口面=单 native 分发器 + 单回调。**地基与路线确定,剩余为 opcode 级 RE(按天计、中等成功率)。**
 
+### 里程碑④突破(2026-06-29 续4):套用 dy233 范本,env 正确初始化
+
+参考社区范本 **`zhuke945/dy233_unidbg_sign`**(抖音 metasec unidbg 签名,同款 libmetasec_ml.so),关键修正:
+- **真实类链**:`ms/bd/c/k ← ms/bd/c/a0 ← com/bytedance/mobsec/metasec/ml/MS`(之前错注册成 MS→Object 才会卡 GetSuperClass(Object))。
+- **`createDalvikVM(base.apk)`** 带真 APK(类解析/签名校验),`memory.setCallInitFunction(true)`。
+- 实现回调:`Thread.getStackTrace`→伪造 2 帧(过反调试栈检查)、`Thread.currentThread`、`MS.a()V`→no-op、`MS.b(op,…)`→按 op 返回(files 目录/版本/布尔)。
+- **结果:JNI_OnLoad + init 在真类链+apk 下完全干净跑通,无 GetSuperClass 报错、init 期未再触发问题 MS.b。env 已正确初始化。**
+
+**签名调用法(范本给定)**:`module.callFunction(<签名函数偏移>, url, headerStr)` → 返回 hash → `vm.getObject(hash)`/`memory.pointer(hash)` 取签名串。
+header 格式为 `key\r\nvalue\r\n…` 配对。
+
+**当前④唯一剩余 = 找红果 libmetasec_ml.so 里那个签名函数的偏移**(dy233 是 0x438c0/32位thumb;红果是 arm64,偏移不同,需 RE):
+- 候选找法:① Ghidra 静态找处理 url+header 字符串、产出头的函数;② 活红果上 trace `tryAddSecurityFactor` 的 native 调用链取偏移(受反 frida 限,需 attach);③ 在 unidbg 里驱动 `y2.a` 的签名 opcode 反推。
+- 找到偏移后:`callFunction(off, url, header)`,期间会触发 `MS.b` 各 op(按需补真值)+ 可能反调试 → 出 X-Argus → 里程碑⑥ 与 Frida 预言机逐字段比对。
+
+> ⚠ 依赖 `base.apk`(125MB,gitignore;放 hongguo-mac/ 或传参指定路径)。
+
 ## 路线图(后续里程碑)
 
 - **② 触发 native 注册 + 摸清 native 方法**:在 unidbg 里建 `MSManager`/`ms.bd.c.*` 的 DvmClass 并调用,

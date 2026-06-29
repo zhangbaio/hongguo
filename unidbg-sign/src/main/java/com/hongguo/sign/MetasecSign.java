@@ -1,101 +1,109 @@
 package com.hongguo.sign;
 
 import com.github.unidbg.AndroidEmulator;
-import com.github.unidbg.Emulator;
 import com.github.unidbg.Module;
-import com.github.unidbg.Symbol;
-import com.github.unidbg.file.FileResult;
-import com.github.unidbg.file.IOResolver;
-import com.github.unidbg.file.linux.AndroidFileIO;
 import com.github.unidbg.linux.android.AndroidEmulatorBuilder;
 import com.github.unidbg.linux.android.AndroidResolver;
-import com.github.unidbg.linux.android.dvm.AbstractJni;
-import com.github.unidbg.linux.android.dvm.BaseVM;
-import com.github.unidbg.linux.android.dvm.DalvikModule;
-import com.github.unidbg.linux.android.dvm.DvmClass;
-import com.github.unidbg.linux.android.dvm.DvmMethod;
-import com.github.unidbg.linux.android.dvm.DvmObject;
-import com.github.unidbg.linux.android.dvm.VM;
-import com.github.unidbg.linux.android.dvm.VaList;
+import com.github.unidbg.linux.android.dvm.*;
+import com.github.unidbg.linux.android.dvm.array.ArrayObject;
+import com.github.unidbg.linux.android.dvm.wrapper.DvmBoolean;
 import com.github.unidbg.memory.Memory;
 
 import java.io.File;
 
 /**
- * 里程碑②:摸清 JNI_OnLoad 为何不注册 native——
- *  - 手动调 JNI_OnLoad 并打印返回值(0x10006=JNI_VERSION_1_6 正常;否则=bail/反模拟器)
- *  - 记录 metasec 在 init 期探测了哪些文件/路径(/proc/self/* /system/* 等反模拟器指纹)
+ * 红果(com.phoenix.read, aid=8662) metasec 脱机签名 —— 仿 dy233_unidbg_sign 范本适配。
+ * 关键:① 真实类链 ms/bd/c/k ← a0 ← MS;② createDalvikVM 带 base.apk;③ 回调喂红果真值。
+ * 里程碑④:先让 JNI_OnLoad + init 在带 apk/真类链下尽量往前,记录 MS.b 各 opcode。
  */
-public class MetasecSign extends AbstractJni implements IOResolver<AndroidFileIO> {
+public class MetasecSign extends AbstractJni {
+
+    static final String PKG = "com.phoenix.read";
+    static final String VER = "7.2.2.32";
+    static final String FILES_DIR = "/data/user/0/com.phoenix.read/files";
 
     private final AndroidEmulator emulator;
     private final VM vm;
     private final Module module;
+    private final Memory memory;
 
-    public MetasecSign(File soFile) {
+    public MetasecSign(File apk, File so) {
         emulator = AndroidEmulatorBuilder.for64Bit()
-                .setProcessName("com.phoenix.read")
+                .setProcessName(PKG)
                 .build();
-        Memory memory = emulator.getMemory();
+        emulator.getSyscallHandler().setVerbose(false);
+        memory = emulator.getMemory();
         memory.setLibraryResolver(new AndroidResolver(23));
+        memory.setCallInitFunction(true);
 
-        emulator.getSyscallHandler().addIOResolver(this);   // 记录文件探测(反模拟器指纹)
-
-        vm = emulator.createDalvikVM();
-        vm.setVerbose(true);
+        vm = (apk != null && apk.exists()) ? emulator.createDalvikVM(apk) : emulator.createDalvikVM();
         vm.setJni(this);
+        vm.setVerbose(true);
 
-        System.out.println("[*] loading " + soFile.getName());
-        DalvikModule dm = vm.loadLibrary(soFile, false);    // false: 手动调 JNI_OnLoad 以拿返回值
+        // 真实类链(范本:k ← a0 ← MS)
+        DvmClass k = vm.resolveClass("ms/bd/c/k");
+        DvmClass a0 = vm.resolveClass("ms/bd/c/a0", k);
+        vm.resolveClass("com/bytedance/mobsec/metasec/ml/MS", a0);
+
+        DalvikModule dm = vm.loadLibrary(so, true);   // true → 调 JNI_OnLoad
         module = dm.getModule();
-        System.out.println("[*] loaded base=0x" + Long.toHexString(module.base) + ", 手动调 JNI_OnLoad...");
-
-        // 预注册 metasec 会 FindClass/GetSuperClass 的类,显式给 Object 父类(过掉 GetSuperClass 异常)
-        com.github.unidbg.linux.android.dvm.DvmClass object = vm.resolveClass("java/lang/Object");
-        vm.resolveClass("com/bytedance/mobsec/metasec/ml/MS", object);
-
-        Symbol onLoad = module.findSymbolByName("JNI_OnLoad", false);
-        Number ret = onLoad.call(emulator, vm.getJavaVM(), 0);
-        int v = ret.intValue();
-        System.out.printf("[*] JNI_OnLoad 返回 = 0x%x  (0x10006=JNI_VERSION_1_6 正常; 其它=异常/bail)%n", v);
-        if (v != 0x10006) {
-            System.out.println("[!] 非正常版本 → metasec 很可能在 JNI_OnLoad 检测到环境异常提前返回(反模拟器/反调试)");
-        } else {
-            System.out.println("[*] JNI_OnLoad 返回正常版本号 → 若上面无 RegisterNatives,则 native 为惰性注册(首次调用时)");
-        }
+        System.out.println("[*] loaded base=0x" + Long.toHexString(module.base) + " JNI_OnLoad 完成");
     }
 
-    // metasec 的 native→Java 回调分发器 MS.b(int op,int,long,String,Object):先日志看 opcode
+    // native→Java 实例方法回调(反调试:伪造调用栈)
     @Override
-    public DvmObject<?> callStaticObjectMethodV(BaseVM vm, DvmClass dvmClass, DvmMethod dvmMethod, VaList vaList) {
-        if ("b".equals(dvmMethod.getMethodName())) {
+    public DvmObject<?> callObjectMethodV(BaseVM vm, DvmObject<?> dvmObject, String signature, VaList vaList) {
+        switch (signature) {
+            case "java/lang/Thread->getStackTrace()[Ljava/lang/StackTraceElement;":
+                return new ArrayObject(
+                        vm.resolveClass("java/lang/StackTraceElement").newObject("dalvik.system.VMStack"),
+                        vm.resolveClass("java/lang/StackTraceElement").newObject("java.lang.Thread"));
+        }
+        System.out.println("    [callObjectMethodV] " + signature);
+        return super.callObjectMethodV(vm, dvmObject, signature, vaList);
+    }
+
+    // metasec 的 native→Java 分发器 MS.b + 其它静态回调
+    @Override
+    public DvmObject<?> callStaticObjectMethodV(BaseVM vm, DvmClass dvmClass, String signature, VaList vaList) {
+        if (signature.startsWith("com/bytedance/mobsec/metasec/ml/MS->b(")) {
             int op = vaList.getIntArg(0);
-            int a1 = vaList.getIntArg(1);
-            long a2 = vaList.getLongArg(2);
-            DvmObject<?> a3 = vaList.getObjectArg(3);
-            System.out.println("    [MS.b] op=" + op + " a1=" + a1 + " a2=" + a2
-                    + " a3=" + (a3 == null ? "null" : a3.getValue()) + "  sig=" + dvmMethod.getSignature());
-            return null; // 暂返回 null,观察后续是否继续/还要什么
+            switch (op) {
+                // 范本 dy233 的 op(版本不同可能不命中,留作参考)
+                case 65539:      return new StringObject(vm, FILES_DIR + "/;o@Y0f");
+                case 33554433:   return DvmBoolean.valueOf(vm, Boolean.TRUE);
+                case 33554434:   return DvmBoolean.valueOf(vm, Boolean.TRUE);
+                case 16777233:   return new StringObject(vm, VER);
+                default:
+                    System.out.println("    [MS.b] 未知 op=" + op + " (0x" + Integer.toHexString(op) + ") → 暂返回 null");
+                    return null;
+            }
         }
-        return super.callStaticObjectMethodV(vm, dvmClass, dvmMethod, vaList);
+        switch (signature) {
+            case "java/lang/Thread->currentThread()Ljava/lang/Thread;":
+                return vm.resolveClass("java/lang/Thread").newObject(Thread.currentThread());
+        }
+        System.out.println("    [callStaticObjectMethodV] " + signature);
+        return super.callStaticObjectMethodV(vm, dvmClass, signature, vaList);
     }
 
-    // 记录所有文件访问(反模拟器探测点);返回 null = 交回 unidbg 默认处理
     @Override
-    public FileResult<AndroidFileIO> resolve(Emulator<AndroidFileIO> emu, String pathname, int oflags) {
-        System.out.println("    [open] " + pathname);
-        return null;
+    public void callStaticVoidMethodV(BaseVM vm, DvmClass dvmClass, String signature, VaList vaList) {
+        if (signature.equals("com/bytedance/mobsec/metasec/ml/MS->a()V")) return;
+        System.out.println("    [callStaticVoidMethodV] " + signature);
+        super.callStaticVoidMethodV(vm, dvmClass, signature, vaList);
     }
 
     public static void main(String[] args) {
-        File so = new File(args.length > 0 ? args[0] : "../capture/so/libmetasec_ml.so");
+        File apk = new File(args.length > 0 ? args[0] : "/Users/zhangbiao/Documents/编程/ai/claude/hongguo-mac/base.apk");
+        File so = new File(args.length > 1 ? args[1] : "../capture/so/libmetasec_ml.so");
         if (!so.exists()) { System.err.println("找不到 so: " + so.getAbsolutePath()); return; }
+        System.out.println("[*] apk=" + (apk.exists() ? apk.getName() : "(无,用空VM)") + " so=" + so.getName());
         try {
-            new MetasecSign(so);
-            System.out.println("[*] 里程碑② 观测完成");
+            new MetasecSign(apk.exists() ? apk : null, so);
+            System.out.println("[*] 里程碑④:JNI_OnLoad/init 在真类链下跑通(看上面 MS.b opcode)");
         } catch (Throwable t) {
-            System.out.println("[!] 卡点:");
-            t.printStackTrace(System.out);
+            System.out.println("[!] 卡点:"); t.printStackTrace(System.out);
         }
     }
 }
