@@ -116,6 +116,22 @@ frida 备忘补充:`-n`(按名 attach)在本机 frida-server 枚举进程失败,
 **副产品**:番茄海外(Fizzo, aid 1967)设备可离线无限铸——若需 Fizzo 内容可直接用。
 推荐红果设备池仍走第五节"app 注册 grab 入池"省力路线, 除非攻破 aid-8662 签名。
 
+### 五次(2026-06-29):攻 aid-8662 签名 → 撞回原始 metasec 墙
+
+试图为红果产 aid-8662 的 X-Argus(applog 注册严格验 aid), 三条路均受阻:
+1. **两个 libmetasec_ml.so 不同版本**:红果 3971808B(md5 a2b9619c..)vs 番茄海外 3447432B(md5 affd5bdf..),
+   0x168c80 处字节完全不同 → 番茄 offset 对红果无效(印证 MetasecSign 当初崩溃)。跑红果自己的库需
+   **红果 sign offset**——OLLVM+VM 保护, 即最初一直没定位的墙。
+2. **跨库喂红果证书**:即便提取红果 metasec 证书喂番茄海外库, 因两库版本不同, 能否出有效 aid-8662 签名未知。
+3. **抓红果证书(MS.b op 16777218)**:hook 到 MS.b 各 op(16777217=apk路径/16777221=dpi/16777222=1000 等),
+   但 **op 16777218 仅在 fresh device_register 特定时刻触发**, frida 时序飘 + 反复 spawn/attach 把 frida CLI 搞崩,
+   本会话未能稳定抓到。frida 备忘:`adb root` 会让 frida-server 变 "jailed"(需重启 frida-server);
+   不清数据 spawn 可免隐私弹窗(已同意持久化在 mmkv), 但 op16777218 此时不再触发(用缓存证书)。
+
+**最终结论**:破红果 aid-8662 签名 ≡ 攻破 OLLVM+VM 保护的 metasec sign offset(研究级 VM 反虚拟化),
+或稳定提取红果证书并验证跨版本复用。这是当初"用跨 app 为内容绕过、从未正面攻破"的硬骨头。
+"别人成功"大概率是真做了 metasec VM 反虚拟化。**红果设备池务实方案仍是第五节 grab 入池。**
+
 ### 抓包环境备忘(复现用)
 - frida 17.9.6:**不能用 raw `create_script`**(`Java`/`Module.findExportByName` 全局已移除),用 `frida` CLI(自带桥接);后台跑需 `sleep N | frida ...` 保持 stdin 否则 REPL 读 EOF 即退;反复 spawn/attach 易把 frida CLI(Python)abort 崩。
 - 触发注册:`adb shell pm clear com.phoenix.read` → spawn → 点"同意并继续"(1080x2400 约 540,2076)→ 通知 Allow(约 540,1245)。
