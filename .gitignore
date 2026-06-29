@@ -81,3 +81,7 @@ rec.json
 capture/fq_oversea/
 capture/ms_cert/
 capture/**/*.bin
+
+# 部署环境变量(真实密钥, 不入库)
+deploy/.env
+deploy/data/

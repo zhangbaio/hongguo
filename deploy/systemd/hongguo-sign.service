@@ -1,0 +1,18 @@
+[Unit]
+Description=Hongguo unidbg 离线签名服务 (FqTrace serve)
+After=network.target
+
+[Service]
+Type=simple
+# WorkingDirectory 必须是 unidbg-sign:FqTrace 用相对路径 ../capture/fq_oversea/ 找 .so 与证书
+WorkingDirectory=/opt/hongguo/unidbg-sign
+ExecStart=/usr/bin/java --add-opens java.base/java.lang=ALL-UNNAMED \
+  -cp /opt/hongguo/unidbg-sign/target/unidbg-sign-1.0-jar-with-dependencies.jar \
+  com.hongguo.sign.FqTrace serve 9099
+Restart=always
+RestartSec=3
+# 只监听本机, 不对外暴露签名端口(仅 API 服务内部调用)
+Environment=JAVA_TOOL_OPTIONS=-Djava.awt.headless=true
+
+[Install]
+WantedBy=multi-user.target

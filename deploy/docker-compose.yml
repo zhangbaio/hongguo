@@ -1,0 +1,36 @@
+# 两容器复用同一镜像:sign(JVM 签名)+ api(Python 流水线)。
+# 密文/二进制经 volume 挂载, 不入镜像。先在仓库根准备好:
+#   unidbg-sign/target/unidbg-sign-1.0-jar-with-dependencies.jar  (本机 mvn package 产出)
+#   capture/fq_oversea/{libmetasec_ml.so,libc++_shared.so,ms_16777218.bin}
+#   config.json  (红果设备参数 + token)
+services:
+  sign:
+    build: { context: .., dockerfile: deploy/Dockerfile }
+    image: hongguo:latest
+    working_dir: /app/unidbg-sign
+    command: >
+      java --add-opens java.base/java.lang=ALL-UNNAMED
+      -cp /app/unidbg-sign/target/unidbg-sign-1.0-jar-with-dependencies.jar
+      com.hongguo.sign.FqTrace serve 9099
+    volumes:
+      - ../unidbg-sign/target/unidbg-sign-1.0-jar-with-dependencies.jar:/app/unidbg-sign/target/unidbg-sign-1.0-jar-with-dependencies.jar:ro
+      - ../capture/fq_oversea:/app/capture/fq_oversea:ro
+    restart: always
+    expose: ["9099"]
+
+  api:
+    image: hongguo:latest
+    depends_on: [sign]
+    command: python3 server.py
+    environment:
+      SIGN_SERVER: http://sign:9099
+      API_KEYS: changeme-client-key
+      ADMIN_TOKEN: changeme-admin-token
+      PYTHONPATH: /app/frida:/app
+    volumes:
+      - ../config.json:/app/config.json:ro
+      - ../apikeys.json:/app/apikeys.json
+      - ./data/downloads:/app/downloads
+    ports:
+      - "8000:8000"
+    restart: always

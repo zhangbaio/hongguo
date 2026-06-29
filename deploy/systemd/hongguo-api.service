@@ -1,0 +1,16 @@
+[Unit]
+Description=Hongguo 脱机下载流水线 API (server.py)
+# 必须在签名服务起来后再启动
+After=network.target hongguo-sign.service
+Requires=hongguo-sign.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/hongguo
+EnvironmentFile=/opt/hongguo/deploy/.env
+ExecStart=/opt/hongguo/venv/bin/python server.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
