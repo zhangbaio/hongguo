@@ -19,6 +19,19 @@
     - `Map frameSign(String, int)`、`Map getFeatureHash(String, byte[])`、`void setCustomInfo(Map, boolean)`
   - 内部实现:`com.bytedance.mobsec.metasec.core.c` / `.core.a`;**native 方法在 `ms.bd.c.*`**(惰性注册)。
 
+## 里程碑②进展(2026-06-29)
+
+跑通后逐步观测 JNI_OnLoad(`MetasecSign` 手动调 + IOResolver 记录文件探测):
+- **未发现反模拟器 bail**:JNI_OnLoad 正常执行 —— 先探测 `/dev/__properties__`、`/proc/stat`,
+  然后 `FindClass(com/bytedance/mobsec/metasec/ml/MS)` **成功**。
+- metasec **向上遍历类继承链**(完整性自检):`GetSuperClass(MS)` → 给它 Object 父类后 → `GetSuperClass(Object)`。
+- **当前前沿卡点**:`GetSuperClass(java/lang/Object)` —— unidbg 0.9.8 对空父类抛 `BackendException`(DalvikVM64$7:148),
+  应返回 null/0。属 unidbg 版本处理细节,**非反模拟器**。
+- 结论:**这条路能往下走**,是标准的 unidbg "逐个补 env 回调" 迭代(每修一个暴露下一个)。
+
+下一步候选:① 升级 unidbg 版本(新版 `GetSuperClass(Object)→0` 已处理);② 或自定义 DalvikVM 覆盖 GetSuperClass 对 Object 返回 0。
+过了继承链遍历后,预计依次遇到:`GetMethodID`/`RegisterNatives`/读 `/proc/self/maps`/`getPackageName`/签名校验 等回调,逐个喂红果真实值。
+
 ## 路线图(后续里程碑)
 
 - **② 触发 native 注册 + 摸清 native 方法**:在 unidbg 里建 `MSManager`/`ms.bd.c.*` 的 DvmClass 并调用,
