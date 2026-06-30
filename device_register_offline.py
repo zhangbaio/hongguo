@@ -67,7 +67,8 @@ def register(device=None):
           "cdid": cdid, "sdk_version": "3.9.6", "tt_data": "a", "req_id": str(uuid.uuid4()),
           "_rticket": str(int(time.time() * 1000))}
     qs = "&".join(f"{k}={requests.utils.quote(str(v), safe='')}" for k, v in qd.items())
-    url = f"https://log.snssdk.com/service/2/device_register/?{qs}"
+    reg_host = os.environ.get("REG_HOST", "log.snssdk.com")
+    url = f"https://{reg_host}/service/2/device_register/?{qs}"
     h = {"content-type": "application/octet-stream;tt-data=a", "x-ss-stub": stub}
     h.update(requests.post(SIGN, json={"url": url, "headers": h}, timeout=60).json())
     h.pop("accept-encoding", None)
