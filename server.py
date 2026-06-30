@@ -474,4 +474,5 @@ def api_stream(series_id: str = None, ep: str = "1", vid: str = None, quality: s
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # 默认只绑本机(脱机直连由同机 xinge 走 127.0.0.1 调); 需对外可设 BIND_HOST=0.0.0.0
+    uvicorn.run(app, host=os.environ.get("BIND_HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "8000")))

@@ -188,7 +188,9 @@ public class FqTrace extends AbstractJni implements IOResolver<AndroidFileIO> {
      *  hongguo.py 只需把 SIGN_SERVERS 指向本服务即可彻底脱离红果 app。模拟器单线程,签名串行加锁。 */
     private void serve(int port) throws Exception {
         final Object lock = new Object();
-        com.sun.net.httpserver.HttpServer srv = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress(port), 0);
+        // 默认只绑本机(签名是敏感预言机, 勿暴露公网); 需对外可设 BIND_HOST 环境变量
+        String bindHost = System.getenv().getOrDefault("BIND_HOST", "127.0.0.1");
+        com.sun.net.httpserver.HttpServer srv = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress(bindHost, port), 0);
         srv.createContext("/sign", ex -> {
             byte[] resp;
             try {
