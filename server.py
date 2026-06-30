@@ -351,7 +351,9 @@ def api_browse(genre: str = "ai_series", theme: str = None, setting: str = None,
                          sort=sort, gender=gender, days=days, status=status, max_items=limit)
         for it in items:                                  # 补服务端可播/取集链接(剧级→播第1集)
             sid = it["series_id"]
-            it["stream_url"] = f"/stream?series_id={sid}&ep=1"   # 直接播第1集(服务端解密)
+            vid = it.get("vid")
+            # 有 vid(7.2.5.32 列表项自带)→ 直接 /stream?vid= 省服务端一次 get_episodes
+            it["stream_url"] = f"/stream?vid={vid}" if vid else f"/stream?series_id={sid}&ep=1"
             it["episodes_url"] = f"/episodes?series_id={sid}"     # 列全集(拿各集再 /stream?...&ep=N)
         return {"genre": genre, "name": H.GENRE_NAMES.get(genre), "count": len(items),
                 "note": "stream_url=播第1集; 其它集用 episodes_url 取集号后 /stream?series_id=&ep=N", "items": items}

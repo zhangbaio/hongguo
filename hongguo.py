@@ -269,6 +269,19 @@ def api(method, path, body=None, extra_query=None, max_retries=3):
     raise last if last else RuntimeError("api 失败")
 
 
+def _cover_tags(d):
+    """提取封面角标(爆剧/新剧/独播…)。cover_tag_info_list 结构不定, 容错取文本。"""
+    out = []
+    for t in (d.get("cover_tag_info_list") or []):
+        if isinstance(t, dict):
+            v = t.get("text") or t.get("content") or t.get("name") or t.get("tag_text") or t.get("title")
+            if v:
+                out.append(re.sub("<[^>]+>", "", str(v)))
+        elif isinstance(t, str) and t:
+            out.append(t)
+    return out
+
+
 def _parse_search_cell(cell):
     """从综合tab的一个cell解析短剧条目; 非短剧(无集数)或无id返回 None。"""
     sid = cell.get("book_id") or cell.get("search_result_id")
@@ -297,6 +310,11 @@ def _parse_search_cell(cell):
         "copyright": vdata.get("copyright") or "",
         "cover": vdata.get("cover") or inner.get("series_cover") or "",
         "intro": (inner.get("series_intro") or vd.get("series_intro") or "")[:60],
+        # 7.2.5.32 接入: 列表项可用字段
+        "vid": vdata.get("vid") or "",                       # 第1集 vid, 可直接播放免再查 episodes
+        "duration": vdata.get("duration") or 0,              # 时长(秒)
+        "horiz_cover": vdata.get("horiz_cover") or "",       # 横版封面
+        "cover_tags": _cover_tags(vdata),                    # 角标: 爆剧/新剧/独播
     }
 
 
@@ -751,7 +769,13 @@ def browse(genre="short_play", theme=None, setting=None, background=None,
                         "episode_cnt": it.get("episode_cnt", 0), "score": it.get("score", ""),
                         "play_cnt": it.get("play_cnt", 0), "cover": it.get("cover", ""),
                         "copyright": it.get("copyright", ""),
-                        "category": " / ".join(cats), "intro": (it.get("video_desc") or "")[:50]})
+                        "category": " / ".join(cats), "intro": (it.get("video_desc") or "")[:50],
+                        # 7.2.5.32 接入: 列表项可用字段
+                        "vid": it.get("vid") or "",                  # 第1集 vid, 可直接播放
+                        "comment_count": it.get("comment_count", 0), # 评论数
+                        "duration": it.get("duration") or 0,         # 时长(秒)
+                        "horiz_cover": it.get("horiz_cover") or "",  # 横版封面
+                        "cover_tags": _cover_tags(it)})              # 角标
             if len(out) >= max_items:
                 break
         pages += 1
