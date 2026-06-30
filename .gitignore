@@ -88,3 +88,7 @@ deploy/data/
 
 # 设备指纹池(生成的设备身份, 不入库)
 devices.json
+
+# 红果签名逆向敏感物(license/设备状态/RE二进制, 勿提交)
+capture/cronet/
+capture/msstate/

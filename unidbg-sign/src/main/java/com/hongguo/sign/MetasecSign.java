@@ -31,7 +31,9 @@ public class MetasecSign extends AbstractJni implements IOResolver<AndroidFileIO
     static final String PKG = "com.phoenix.read";
     static final String VER = "7.2.2.32";
     static final String FILES = "/data/user/0/com.phoenix.read/files";
-    static final long SIGN_OFFSET = 0x168c80;   // 番茄海外偏移,先试
+    // 红果自身 sign offset(2026-06-30 动态逆出):cronet 数据段 sscronet+0x5f5458 注册的 metasec 回调。
+    // 调用约定: sign(x0=url, x1=header, x2=0x18, x3=ns_tick, x4=0xffffffffffffff, x5=counter) → "X-Argus\r\n...".
+    static final long SIGN_OFFSET = 0x27d288;
 
     private final AndroidEmulator emulator;
     private final VM vm;
@@ -73,11 +75,44 @@ public class MetasecSign extends AbstractJni implements IOResolver<AndroidFileIO
         DalvikModule dm = vm.loadLibrary(soMeta, true);
         module = dm.getModule();
         dm.callJNI_OnLoad(emulator);
-        System.out.println("[*] init 完成 base=0x" + Long.toHexString(module.base));
+        System.out.println("[*] JNI_OnLoad 完成 base=0x" + Long.toHexString(module.base));
+        driveInit();
     }
 
+    /** 调分发器 a(IIJLString;Object) 驱动 SDK init(op1=0x4000001 + JSON config 含 license)。 */
+    private void dispatch(int op1, int op2, long lv, String s, DvmObject<?> obj) {
+        DvmClass m = vm.resolveClass("ms/bd/c/m");
+        DvmObject<?> sObj = s == null ? null : new StringObject(vm, s);
+        m.callStaticJniMethodObject(emulator,
+                "a(IIJLjava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;",
+                op1, op2, lv, sObj, obj);
+    }
+
+    private void driveInit() {
+        try {
+            File cfgFile = new File("../capture/cronet/init_config.json");
+            if (!cfgFile.exists()) { System.out.println("[!] 缺 init_config.json, 跳过 init"); return; }
+            String cfg = new String(Files.readAllBytes(cfgFile.toPath()), StandardCharsets.UTF_8).trim();
+            System.out.println("[*] 驱动 SDK init (op 0x4000001, license len=" + cfg.length() + ")...");
+            DvmClass m = vm.resolveClass("ms/bd/c/m");
+            DvmObject<?> ret = m.callStaticJniMethodObject(emulator,
+                    "a(IIJLjava/lang/String;Ljava/lang/Object;)Ljava/lang/Object;",
+                    0x4000001, 0, 0L, new StringObject(vm, cfg), null);
+            System.out.println("[*] SDK init 返回 = " + (ret == null ? "null" : ret.getValue()));
+        } catch (Throwable t) {
+            System.out.println("[!] init 异常: " + t);
+            t.printStackTrace(System.out);
+        }
+    }
+
+    private long tick = 0x2d641eee02cfL;   // ns 单调 tick(递增即可)
+    private int counter = 0x3a75b16;
+
     public String sign(String url, String header) {
-        Number n = module.callFunction(emulator, SIGN_OFFSET, url, header);
+        // 6 参数调用约定(动态逆出):x2=0x18, x4=0xffffffffffffff 为常量; x3 tick / x5 counter 递增。
+        Number n = module.callFunction(emulator, SIGN_OFFSET,
+                url, header, 0x18, tick, 0xffffffffffffffL, counter);
+        tick += 0x100000; counter++;
         if (n == null) return null;
         UnidbgPointer p = memory.pointer(n.longValue());
         return p == null ? null : p.getString(0);
@@ -110,6 +145,12 @@ public class MetasecSign extends AbstractJni implements IOResolver<AndroidFileIO
             return handleMS(vm, va.getIntArg(0));
         if (sig.equals("java/lang/Thread->currentThread()Ljava/lang/Thread;"))
             return vm.resolveClass("java/lang/Thread").newObject(Thread.currentThread());
+        if (sig.equals("java/lang/Boolean->valueOf(Z)Ljava/lang/Boolean;"))
+            return DvmBoolean.valueOf(vm, va.getIntArg(0) != 0);
+        if (sig.equals("java/lang/Integer->valueOf(I)Ljava/lang/Integer;"))
+            return vm.resolveClass("java/lang/Integer").newObject(va.getIntArg(0));
+        if (sig.equals("java/lang/Long->valueOf(J)Ljava/lang/Long;"))
+            return vm.resolveClass("java/lang/Long").newObject(va.getLongArg(0));
         return super.callStaticObjectMethodV(vm, c, sig, va);
     }
 
@@ -162,10 +203,29 @@ public class MetasecSign extends AbstractJni implements IOResolver<AndroidFileIO
         super.callVoidMethod(vm, o, sig, va);
     }
 
+    static final String FILESDIR = "/data/user/0/com.phoenix.read/files";
+    static final File MSROOT = new File("../capture/msstate"); // 含 .msdata/ 真身(从设备拉取)
+
     @Override
     public FileResult resolve(Emulator emu, String pathname, int oflags) {
         if (pathname.contains("libmetasec_ml.so"))
             return FileResult.success(new SimpleFileIO(oflags, soMeta, pathname));
+        // 映射 metasec 状态目录: /data/.../files/... -> ../capture/msstate/...
+        if (pathname.startsWith(FILESDIR)) {
+            String rel = pathname.substring(FILESDIR.length());
+            File local = new File(MSROOT, rel);
+            if (local.isDirectory())
+                return FileResult.success(new com.github.unidbg.linux.file.DirectoryFileIO(oflags, pathname, local));
+            if (local.exists())
+                return FileResult.success(new SimpleFileIO(oflags, local, pathname));
+            // 不存在: 写/创建(O_CREAT=0x40) 才建文件让 metasec 写新态; 纯读/access 返回未找到
+            if ((oflags & 0x40) != 0) {
+                local.getParentFile().mkdirs();
+                try { local.createNewFile(); } catch (Exception e) {}
+                return FileResult.success(new SimpleFileIO(oflags, local, pathname));
+            }
+            return null;
+        }
         return null;
     }
 
@@ -176,11 +236,14 @@ public class MetasecSign extends AbstractJni implements IOResolver<AndroidFileIO
         if (!meta.exists()) { System.err.println("缺 libmetasec_ml.so"); return; }
         try {
             MetasecSign s = new MetasecSign(meta, cpp.exists()?cpp:null, cert.exists()?cert:null);
-            String url = "https://api5-normal-sinfonlinea.fqnovel.com/novel/player/multi_video_model/v1/?aid=8662&device_platform=android";
-            String header = "x-ss-stub\r\nD41D8CD98F00B204E9800998ECF8427E\r\ncontent-type\r\napplication/json; charset=utf-8";
-            System.out.println("[*] 试签名...");
+            // 简单 url+header 先看能否出 X-Argus(验证 offset+调用约定在 unidbg 成立)
+            String url = "https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v?aid=8662&device_id=1325332544628567&iid=1325332544632663&version_code=72232&query=test";
+            String header = "x-ss-req-ticket\r\n1782800542209\r\ncontent-type\r\napplication/json; charset=utf-8\r\nx-ss-stub\r\n";
+            System.out.println("[*] 试签名 (offset 0x" + Long.toHexString(SIGN_OFFSET) + ")...");
             String sig = s.sign(url, header);
-            System.out.println("[*] 签名结果 = " + sig);
+            System.out.println("===SIG_START===");
+            System.out.println(sig);
+            System.out.println("===SIG_END===");
         } catch (Throwable t) { System.out.println("[!] 卡点:"); t.printStackTrace(System.out); }
     }
 }
