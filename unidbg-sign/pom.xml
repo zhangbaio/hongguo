@@ -31,6 +31,13 @@
             <artifactId>unidbg-android</artifactId>
             <version>0.9.9</version>
         </dependency>
+        <!-- Unicorn2 后端: 提供可在 Linux x64 运行的自洽 native(natives/linux_64/libunicorn.so);
+             unidbg-android 默认声明为 test scope, 这里提为 compile 打进 fat jar 以跨平台运行 -->
+        <dependency>
+            <groupId>com.github.zhkl0228</groupId>
+            <artifactId>unidbg-unicorn2</artifactId>
+            <version>0.9.9</version>
+        </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>

@@ -40,7 +40,9 @@ public class FqTrace extends AbstractJni implements IOResolver<AndroidFileIO> {
     private final File cert = new File(DIR + "ms_16777218.bin");
 
     public FqTrace() {
-        emulator = AndroidEmulatorBuilder.for64Bit().setProcessName(PKG).build();
+        emulator = AndroidEmulatorBuilder.for64Bit()
+                .addBackendFactory(new com.github.unidbg.arm.backend.Unicorn2Factory(true))  // Unicorn2: Linux x64 自洽 native
+                .setProcessName(PKG).build();
         emulator.getSyscallHandler().setVerbose(false);
         emulator.getSyscallHandler().addIOResolver(this);
         java.util.Map<String, Integer> inode = new java.util.HashMap<>();
