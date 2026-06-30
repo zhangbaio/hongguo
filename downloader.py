@@ -101,8 +101,8 @@ def download_one(url, path, expected_size=None, refetch=None, retries=5, on_prog
     for attempt in range(retries):
         seg_used = False
         try:
-            # 优先分段: 探测大小+Range支持, 够大就并发分段
-            if use_seg and not os.path.exists(tmp):
+            # 优先分段: 仅当(已知大小够大 或 大小未知)才探测, 避免小文件白白多一次往返
+            if use_seg and not os.path.exists(tmp) and (expected_size is None or expected_size >= DL_SEG_MIN):
                 total, range_ok = _probe(url)
                 if range_ok and total >= DL_SEG_MIN:
                     nseg = min(DL_SEGMENTS, max(1, total // (1024 * 1024)))  # 每段≥~1MB
