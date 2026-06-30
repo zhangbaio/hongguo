@@ -46,16 +46,36 @@ def _ext_proxies():
     return {"http": HONGGUO_PROXY, "https": HONGGUO_PROXY} if HONGGUO_PROXY else None
 
 
+# 连接复用: 线程本地持久 Session(keep-alive+连接池)。requests/curl_cffi 的 Session 非跨线程安全,
+# 故每线程一个(适配 FastAPI 线程池 + 下载 ThreadPoolExecutor)。消除每请求 TCP+TLS 握手。
+import threading as _th
+_tls = _th.local()
+
+
+def _ext_session():
+    s = getattr(_tls, "ext", None)
+    if s is None:
+        if _HAS_CFFI and IMPERSONATE:
+            s = _cffi.Session()
+        else:
+            s = requests.Session()
+            ad = requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=32, max_retries=0)
+            s.mount("https://", ad)
+            s.mount("http://", ad)
+        _tls.ext = s
+    return s
+
+
 def http_request(method, url, **kw):
-    """对外部(红果/CDN)发请求: 自动注入 verify=False + 代理 + curl_cffi 指纹伪装(若可用)。
+    """对外部(红果/CDN)发请求: 线程本地 Session 复用连接 + verify=False + 代理 + curl_cffi 指纹伪装。
     curl_cffi 未安装或 IMPERSONATE 为空 → 透明退回原生 requests(行为不变)。"""
     kw.setdefault("verify", False)
     if HONGGUO_PROXY:
         kw.setdefault("proxies", _ext_proxies())
+    s = _ext_session()
     if _HAS_CFFI and IMPERSONATE:
         kw.setdefault("impersonate", IMPERSONATE)
-        return _cffi.request(method, url, **kw)
-    return requests.request(method, url, **kw)
+    return s.request(method, url, **kw)
 
 urllib3.disable_warnings()
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -120,14 +140,25 @@ def _next_sign_server():
         return SIGN_SERVERS[i]
 
 
+def _sign_session():
+    """对本机签名服务的线程本地 Session(keep-alive, 省每签名一次握手/TIME_WAIT)。"""
+    s = getattr(_tls, "sign", None)
+    if s is None:
+        s = requests.Session()
+        s.mount("http://", requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=16, max_retries=0))
+        _tls.sign = s
+    return s
+
+
 def sign(url, headers):
     """签名。多签名服务轮询+故障转移; 无配置则进程内Frida。"""
     if SIGN_SERVERS:
         errs = []
+        sess = _sign_session()
         for _ in range(len(SIGN_SERVERS)):
             base = _next_sign_server()
             try:
-                r = requests.post(base.rstrip("/") + "/sign",
+                r = sess.post(base.rstrip("/") + "/sign",
                                   json={"url": url, "headers": headers}, timeout=40)
                 r.raise_for_status()
                 j = r.json()

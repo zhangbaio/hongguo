@@ -1,9 +1,32 @@
 # -*- coding: utf-8 -*-
-"""下载管理器: 并发 + 断点续传 + 失败重试 + 直链过期自动重取 + 元数据。"""
+"""下载管理器: 并发 + 分段多连接 + 断点续传 + 失败重试 + 直链过期自动重取 + 元数据。"""
 import os, re, json, time, threading, uuid
 from concurrent.futures import ThreadPoolExecutor
 import requests, urllib3
 urllib3.disable_warnings()
+
+# 下载调优(环境变量可调):
+#   HG_DL_SEGMENTS : 单文件分段并发连接数(默认8); 1=禁用分段走单流
+#   HG_DL_SEG_MIN  : 启用分段的最小文件字节(默认 3MB); 小文件不值得分段
+#   HG_DL_CONCURRENCY : 同时下载的文件数(默认4)
+DL_SEGMENTS = max(1, int(os.environ.get("HG_DL_SEGMENTS", "8")))
+DL_SEG_MIN = int(os.environ.get("HG_DL_SEG_MIN", str(3 * 1024 * 1024)))
+DL_CONCURRENCY = max(1, int(os.environ.get("HG_DL_CONCURRENCY", "3")))
+
+# 连接复用: 线程本地 requests.Session(keep-alive + 连接池), 省每次握手
+_dltls = threading.local()
+
+
+def _dl_session():
+    s = getattr(_dltls, "s", None)
+    if s is None:
+        s = requests.Session()
+        ad = requests.adapters.HTTPAdapter(pool_connections=DL_SEGMENTS * 2,
+                                           pool_maxsize=DL_SEGMENTS * 4, max_retries=0)
+        s.mount("https://", ad)
+        s.mount("http://", ad)
+        _dltls.s = s
+    return s
 
 
 def sanitize(name):
@@ -18,19 +41,84 @@ def _img_ext(url):
     return ".jpg"
 
 
+def _probe(url):
+    """探测总大小 + 是否支持 Range(206)。返回 (total, range_ok)。失败返回 (0, False)。"""
+    try:
+        with _dl_session().get(url, headers={"Range": "bytes=0-0"}, stream=True,
+                               verify=False, timeout=30) as r:
+            if r.status_code == 206:
+                cr = r.headers.get("content-range", "")  # bytes 0-0/12345
+                total = int(cr.split("/")[-1]) if "/" in cr else 0
+                return total, total > 0
+            if r.status_code == 200:
+                return int(r.headers.get("content-length", 0)), False
+    except Exception:
+        pass
+    return 0, False
+
+
+def _download_segmented(url, tmp, total, nseg, on_progress):
+    """分段并发下载到预分配的 tmp(各段 seek 写入)。任一段失败则抛异常(外层重试整体)。"""
+    seg = total // nseg
+    ranges = [(i * seg, (total - 1 if i == nseg - 1 else (i + 1) * seg - 1)) for i in range(nseg)]
+    with open(tmp, "wb") as f:
+        f.truncate(total)
+    prog = [0] * nseg
+    lock = threading.Lock()
+    errs = []
+
+    def dl(i, lo, hi):
+        try:
+            s = _dl_session()
+            with s.get(url, headers={"Range": f"bytes={lo}-{hi}"}, stream=True,
+                       verify=False, timeout=60) as r:
+                if r.status_code not in (206, 200):
+                    raise requests.RequestException(f"HTTP {r.status_code}")
+                with open(tmp, "r+b") as f:
+                    f.seek(lo)
+                    for chunk in r.iter_content(262144):
+                        f.write(chunk)
+                        with lock:
+                            prog[i] += len(chunk)
+                            if on_progress:
+                                on_progress(sum(prog), total)
+        except Exception as e:
+            errs.append(e)
+
+    with ThreadPoolExecutor(max_workers=nseg) as ex:
+        list(ex.map(lambda a: dl(*a), [(i, lo, hi) for i, (lo, hi) in enumerate(ranges)]))
+    if errs:
+        raise errs[0]
+    if os.path.getsize(tmp) != total:
+        raise IOError(f"分段大小不符 {os.path.getsize(tmp)}/{total}")
+
+
 def download_one(url, path, expected_size=None, refetch=None, retries=5, on_progress=None):
-    """单文件下载: 断点续传(.part) + 重试 + 过期重取。
+    """单文件下载: 分段多连接(支持Range时) / 单流断点续传 + 重试 + 过期重取。
     refetch(): 返回新的url(直链过期时调用)。on_progress(done,total)。"""
     tmp = path + ".part"
+    use_seg = DL_SEGMENTS > 1
     for attempt in range(retries):
-        done = os.path.getsize(tmp) if os.path.exists(tmp) else 0
-        headers = {"Range": f"bytes={done}-"} if done else {}
+        seg_used = False
         try:
-            with requests.get(url, stream=True, headers=headers, verify=False, timeout=60) as r:
+            # 优先分段: 探测大小+Range支持, 够大就并发分段
+            if use_seg and not os.path.exists(tmp):
+                total, range_ok = _probe(url)
+                if range_ok and total >= DL_SEG_MIN:
+                    nseg = min(DL_SEGMENTS, max(1, total // (1024 * 1024)))  # 每段≥~1MB
+                    seg_used = True
+                    _download_segmented(url, tmp, total, nseg, on_progress)
+                    if expected_size and os.path.getsize(tmp) < expected_size * 0.98:
+                        raise IOError(f"大小不足 {os.path.getsize(tmp)}/{expected_size}")
+                    os.replace(tmp, path)
+                    return True
+            # 单流(断点续传): 不支持Range/文件小/已有.part续传
+            done = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+            headers = {"Range": f"bytes={done}-"} if done else {}
+            with _dl_session().get(url, stream=True, headers=headers, verify=False, timeout=60) as r:
                 if r.status_code == 416:  # range超出=已完整
                     break
                 if done and r.status_code == 200:
-                    # 服务器不支持range,从头来
                     done = 0
                     open(tmp, "wb").close()
                 elif r.status_code not in (200, 206):
@@ -43,7 +131,6 @@ def download_one(url, path, expected_size=None, refetch=None, retries=5, on_prog
                         done += len(chunk)
                         if on_progress and total:
                             on_progress(done, total)
-            # 完整性: 有期望大小则校验
             final = os.path.getsize(tmp)
             if expected_size and final < expected_size * 0.98:
                 raise IOError(f"大小不足 {final}/{expected_size}")
@@ -52,6 +139,12 @@ def download_one(url, path, expected_size=None, refetch=None, retries=5, on_prog
         except Exception as e:
             wait = min(2 ** attempt, 15)
             print(f"    下载重试{attempt+1}/{retries} ({e}), {wait}s后...")
+            if seg_used:  # 分段失败: tmp是预分配整块不可续传→清掉, 且退回单流避免反复失败
+                use_seg = False
+                if os.path.exists(tmp):
+                    try: os.remove(tmp)
+                    except Exception: pass
+            # 单流失败: 保留 .part 供下次续传
             time.sleep(wait)
             if refetch:  # 直链可能过期,重取
                 try:
@@ -82,7 +175,7 @@ def write_metadata(folder, meta, eps):
 
 
 class DownloadManager:
-    def __init__(self, get_episodes, get_video_urls, out_dir, concurrency=3):
+    def __init__(self, get_episodes, get_video_urls, out_dir, concurrency=DL_CONCURRENCY):
         self.get_episodes = get_episodes
         self.get_video_urls = get_video_urls
         self.out_dir = out_dir
