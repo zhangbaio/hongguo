@@ -184,11 +184,28 @@ public class FqTrace extends AbstractJni implements IOResolver<AndroidFileIO> {
         return m;
     }
 
-    /** 常驻签名服务:POST /sign {"url":..,"headers":{..}} → {"X-Argus":..}。协议同原 frida 签名服务,
-     *  hongguo.py 只需把 SIGN_SERVERS 指向本服务即可彻底脱离红果 app。模拟器单线程,签名串行加锁。 */
-    private void serve(int port) throws Exception {
-        final Object lock = new Object();
-        // 默认只绑本机(签名是敏感预言机, 勿暴露公网); 需对外可设 BIND_HOST 环境变量
+    /** 常驻签名服务:POST /sign {"url":..,"headers":{..}} → {"X-Argus":..}。协议同原 frida 签名服务。
+     *  单模拟器单线程(unidbg 同 JVM 多模拟器并发会出空签名,故一进程一模拟器、签名加锁)。
+     *  HTTP 用线程池并发收连接;真并发签名靠多进程(多端口)+ hongguo.py 的 SIGN_SERVER 轮询。 */
+    /** 常驻签名服务。unidbg 模拟器绑"创建它的那个线程",故由专用签名线程自己创建模拟器并串行处理所有签名;
+     *  HTTP 用线程池并发收连接(解决 setExecutor(null) 并发连接挤队列拖慢),各连接入队后阻塞等结果。 */
+    static void serveStatic(int port) throws Exception {
+        final java.util.concurrent.BlockingQueue<Object[]> queue = new java.util.concurrent.LinkedBlockingQueue<>();
+        Thread signer = new Thread(() -> {
+            FqTrace t = new FqTrace();                    // 模拟器在本线程创建 = 后续都在本线程用
+            System.out.println("[*] 签名工作线程就绪(模拟器本线程持有)");
+            while (true) {
+                Object[] task;
+                try { task = queue.take(); } catch (InterruptedException ie) { return; }
+                @SuppressWarnings("unchecked")
+                java.util.concurrent.CompletableFuture<java.util.Map<String, String>> fut =
+                        (java.util.concurrent.CompletableFuture<java.util.Map<String, String>>) task[2];
+                try { fut.complete(t.signMap((String) task[0], (String) task[1])); }
+                catch (Throwable e) { fut.completeExceptionally(e); }
+            }
+        }, "fqtrace-signer");
+        signer.setDaemon(true);
+        signer.start();
         String bindHost = System.getenv().getOrDefault("BIND_HOST", "127.0.0.1");
         com.sun.net.httpserver.HttpServer srv = com.sun.net.httpserver.HttpServer.create(new java.net.InetSocketAddress(bindHost, port), 0);
         srv.createContext("/sign", ex -> {
@@ -203,8 +220,9 @@ public class FqTrace extends AbstractJni implements IOResolver<AndroidFileIO> {
                     if (hb.length() > 0) hb.append("\r\n");
                     hb.append(k).append("\r\n").append(hs.getString(k));
                 }
-                java.util.Map<String, String> sig;
-                synchronized (lock) { sig = signMap(url, hb.toString()); }
+                java.util.concurrent.CompletableFuture<java.util.Map<String, String>> fut = new java.util.concurrent.CompletableFuture<>();
+                queue.add(new Object[]{url, hb.toString(), fut});
+                java.util.Map<String, String> sig = fut.get();   // 等签名线程串行处理
                 resp = com.alibaba.fastjson.JSON.toJSONString(sig).getBytes(StandardCharsets.UTF_8);
             } catch (Throwable t) {
                 resp = ("{\"error\":\"" + String.valueOf(t.getMessage()).replace('"', '\'') + "\"}").getBytes(StandardCharsets.UTF_8);
@@ -214,9 +232,9 @@ public class FqTrace extends AbstractJni implements IOResolver<AndroidFileIO> {
             ex.getResponseBody().write(resp);
             ex.close();
         });
-        srv.setExecutor(null);
+        srv.setExecutor(java.util.concurrent.Executors.newFixedThreadPool(16));  // 并发收连接
         srv.start();
-        System.out.println("[*] unidbg 离线签名服务已启动: http://127.0.0.1:" + port + "/sign (Ctrl-C 停止)");
+        System.out.println("[*] unidbg 离线签名服务已启动: " + bindHost + ":" + port + "/sign (Ctrl-C 停止)");
     }
 
     private static byte[] readAll(java.io.InputStream is) throws java.io.IOException {
@@ -227,14 +245,14 @@ public class FqTrace extends AbstractJni implements IOResolver<AndroidFileIO> {
     }
 
     public static void main(String[] args) throws Exception {
-        FqTrace t = new FqTrace();
-        // 服务模式:serve [port] → 常驻 HTTP 签名服务(给 hongguo.py 的 SIGN_SERVERS)
+        // 服务模式:serve [port] → 常驻 HTTP 签名服务(专用签名线程持有模拟器)
         if (args.length >= 1 && args[0].equals("serve")) {
             int port = args.length >= 2 ? Integer.parseInt(args[1]) : 9090;
-            t.serve(port);
+            serveStatic(port);
             Thread.currentThread().join();
             return;
         }
+        FqTrace t = new FqTrace();
         // 命令行模式:args[0]=url, args[1]=header(\r\n分隔 key/value) → 输出签名头(给红果API试签)
         if (args.length >= 1) {
             String url = args[0];

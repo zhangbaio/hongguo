@@ -269,10 +269,14 @@ def _parse_search_cell(cell):
     }
 
 
-def search(query, max_items=40):
+def search(query, max_items=None):
     """搜索短剧。原生接口按综合tab分页(next_offset+passback+search_id),
     这里循环翻页累计短剧结果, 直到 has_more=False 或达 max_items / 翻页上限。
+    max_items 越小翻页越少越快(单 IP 顺序翻页是单次延迟主因); 默认走 HG_SEARCH_MAX_ITEMS(20)。
     """
+    if max_items is None:
+        max_items = int(os.environ.get("HG_SEARCH_MAX_ITEMS", "20"))
+    max_items = max(1, min(max_items, 40))  # 上限40(=原生页满量), 防客户端要过多触发12页
     ck = SG.cache_key("search", query, max_items)
     cached = SG.cache_get(ck)
     if cached is not None:

@@ -287,9 +287,10 @@ def img(url: str):
 
 
 @app.get("/search")
-def api_search(q: str = Query(..., description="剧名")):
+def api_search(q: str = Query(..., description="剧名"),
+              limit: int = Query(None, ge=1, le=40, description="结果上限(越小越快; 默认走 HG_SEARCH_MAX_ITEMS=20)")):
     try:
-        return {"query": q, "results": H.search(q)}
+        return {"query": q, "results": H.search(q, max_items=limit)}
     except Exception as e:
         raise HTTPException(500, f"search失败: {e}")
 

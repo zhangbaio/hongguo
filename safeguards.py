@@ -52,7 +52,12 @@ def cache_key(*parts):
 
 # ---------------- 节流(令牌桶 + 最小间隔 + 抖动) ----------------
 class Throttle:
-    def __init__(self, min_interval=0.6, jitter=0.4, burst=3, refill_per_sec=1.5):
+    # 可经环境变量调(并发场景放开;默认保守防风控)。单设备/单IP放太大有风控风险。
+    def __init__(self,
+                 min_interval=float(os.environ.get("HG_THROTTLE_MIN_INTERVAL", "0.6")),
+                 jitter=float(os.environ.get("HG_THROTTLE_JITTER", "0.4")),
+                 burst=float(os.environ.get("HG_THROTTLE_BURST", "3")),
+                 refill_per_sec=float(os.environ.get("HG_THROTTLE_REFILL", "1.5"))):
         self.min_interval = min_interval
         self.jitter = jitter
         self.lock = threading.Lock()
