@@ -29,7 +29,7 @@ import java.nio.file.Files;
 public class MetasecSign extends AbstractJni implements IOResolver<AndroidFileIO> {
 
     static final String PKG = "com.phoenix.read";
-    static final String VER = "7.2.2.32";
+    static final String VER = "7.2.5.32";      // 对齐设备实际版本(.msp hash 含 versionCode)
     static final String FILES = "/data/user/0/com.phoenix.read/files";
     // 红果自身 sign offset(2026-06-30 动态逆出):cronet 数据段 sscronet+0x5f5458 注册的 metasec 回调。
     // 调用约定: sign(x0=url, x1=header, x2=0x18, x3=ns_tick, x4=0xffffffffffffff, x5=counter) → "X-Argus\r\n...".
@@ -76,7 +76,8 @@ public class MetasecSign extends AbstractJni implements IOResolver<AndroidFileIO
         module = dm.getModule();
         dm.callJNI_OnLoad(emulator);
         System.out.println("[*] JNI_OnLoad 完成 base=0x" + Long.toHexString(module.base));
-        driveInit();
+        if (System.getProperty("noinit") == null) driveInit();
+        else System.out.println("[*] 跳过 driveInit (noinit), 让 sign 惰性初始化(仿 FqTrace)");
     }
 
     /** 调分发器 a(IIJLString;Object) 驱动 SDK init(op1=0x4000001 + JSON config 含 license)。 */
@@ -119,11 +120,12 @@ public class MetasecSign extends AbstractJni implements IOResolver<AndroidFileIO
     }
 
     private DvmObject<?> handleMS(BaseVM vm, int op) {
+        System.out.println("  [MS.b op=" + op + " 0x" + Integer.toHexString(op) + "]");
         switch (op) {
             case 65539:    return new StringObject(vm, FILES + "/.msdata");
             case 33554433:
             case 33554434: return DvmBoolean.valueOf(vm, true);
-            case 16777232: return vm.resolveClass("java/lang/Integer").newObject(72232); // 红果 versionCode
+            case 16777232: return vm.resolveClass("java/lang/Integer").newObject(72532); // 红果 versionCode(7.2.5.32)
             case 16777233: return new StringObject(vm, VER);
             case 16777218:
                 try {
@@ -210,6 +212,8 @@ public class MetasecSign extends AbstractJni implements IOResolver<AndroidFileIO
     public FileResult resolve(Emulator emu, String pathname, int oflags) {
         if (pathname.contains("libmetasec_ml.so"))
             return FileResult.success(new SimpleFileIO(oflags, soMeta, pathname));
+        if (pathname.startsWith(FILESDIR) || pathname.contains(".ms") || pathname.contains("msdata"))
+            System.out.println("  [resolve] " + pathname + " oflags=0x" + Integer.toHexString(oflags));
         // 映射 metasec 状态目录: /data/.../files/... -> ../capture/msstate/...
         if (pathname.startsWith(FILESDIR)) {
             String rel = pathname.substring(FILESDIR.length());
