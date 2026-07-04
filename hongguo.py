@@ -129,6 +129,11 @@ def oracle():
 # 签名后端: SIGN_SERVER 可逗号分隔多个(多设备池),轮询+故障转移以分摊负载降风控。
 # 如 "http://127.0.0.1:8001,http://127.0.0.1:8002"。为空则进程内Frida(CLI模式)。
 SIGN_SERVERS = [s.strip() for s in (os.environ.get("SIGN_SERVER") or "").split(",") if s.strip()]
+
+# 列表类接口(landpage 筛选/最新上架 + bookmall/cell 榜单)经实测红果不校验 X-Argus 签名,
+# 游客态、并发均返回 code=0。默认对这些接口免签,把高频轮询(latest/rank/filters/browse)
+# 从签名后端(unidbg)彻底卸载,避免其被打爆/OOM。若红果日后收紧,设 HG_SIGN_LIST=1 恢复签名。
+SIGN_LIST = (os.environ.get("HG_SIGN_LIST") or "").strip().lower() in ("1", "true", "yes", "on")
 _sign_rr = [0]
 _sign_rr_lock = threading.Lock()
 
@@ -223,7 +228,7 @@ def build_url(path, extra=None):
     return f"https://{HOST}{path}?{qs}"
 
 
-def _api_once(method, path, body, extra_query):
+def _api_once(method, path, body, extra_query, signed=True):
     url = build_url(path, extra_query)
     headers = dict(CFG["session_headers"])
     if _pool:                             # 池设备走游客: 用自洽 UA, 不带原账号 token/cookie
@@ -237,8 +242,8 @@ def _api_once(method, path, body, extra_query):
     if body is not None:
         data = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         headers["x-ss-stub"] = hashlib.md5(data).hexdigest().upper()
-    sec = sign(url, headers)              # 预言机生成新鲜签名
-    headers.update(sec)
+    if signed:                            # 列表类接口 signed=False: 免签, 不触碰签名后端
+        headers.update(sign(url, headers))   # 预言机生成新鲜签名
     headers.pop("accept-encoding", None)
     SG.throttle.wait()                    # 节流
     r = http_request(method, url, data=data, headers=headers, timeout=30)
@@ -247,12 +252,13 @@ def _api_once(method, path, body, extra_query):
     return j
 
 
-def api(method, path, body=None, extra_query=None, max_retries=3):
-    """带签名的 API 调用,含重试退避 + 登录态自动刷新。"""
+def api(method, path, body=None, extra_query=None, max_retries=3, signed=True):
+    """带签名的 API 调用,含重试退避 + 登录态自动刷新。
+    signed=False: 免签(列表/榜单/筛选类接口红果不校验签名, 不占用签名后端)。"""
     last = None
     for attempt in range(max_retries):
         try:
-            return _api_once(method, path, body, extra_query)
+            return _api_once(method, path, body, extra_query, signed=signed)
         except AuthExpiredError as e:
             last = e
             print(f"[api] 登录态失效,刷新后重试 ({path})")
@@ -562,7 +568,7 @@ def rank(board="recommend", limit=30):
              "session_uuid": sess}
         if offset:
             q["offset"] = str(offset)
-        j = api("GET", "/reading/bookapi/bookmall/cell/change/v", extra_query=q)
+        j = api("GET", "/reading/bookapi/bookmall/cell/change/v", extra_query=q, signed=SIGN_LIST)
         cv = j.get("data", {}).get("cell_view", {})
         cells = cv.get("cell_data", [])
         if not cells:
@@ -625,7 +631,7 @@ def latest(genre="short_play", only_today=True, max_items=120, stop_ids=None, re
                                  "category_dim_role": [], "genre": [g], "sort": ["online_time"],
                                  "category_dim_theme": []},
                 "session_id": "", "req_type": "only_content", "client_req_type": 3}
-        j = api("POST", "/reading/distribution/category/landpage/v", body=body)
+        j = api("POST", "/reading/distribution/category/landpage/v", body=body, signed=SIGN_LIST)
         items = j.get("data", {}).get("video_data", [])
         if not items:
             break
@@ -720,7 +726,7 @@ def filters(genre="short_play"):
             "select_items": {"category_dim_epoch": [], "online_time": [], "gender": [],
                              "category_dim_role": [], "genre": [g], "sort": [], "category_dim_theme": []},
             "session_id": ""}
-    rows = api("POST", "/reading/distribution/category/landpage/v", body=body).get("data", {}).get("selector_rows", [])
+    rows = api("POST", "/reading/distribution/category/landpage/v", body=body, signed=SIGN_LIST).get("data", {}).get("selector_rows", [])
     return [{"type": r.get("type"), "row_name": r.get("row_name"), "selection_type": r.get("selection_type"),
              "items": [{"id": it.get("selector_item_id"), "name": it.get("show_name")} for it in r.get("items", [])]}
             for r in rows]
@@ -754,7 +760,7 @@ def browse(genre="short_play", theme=None, setting=None, background=None,
         body = {"filter_ids": ",".join(shown), "req_scene": scene, "offset": offset,
                 "need_selector_panel": False, "limit": 18, "select_items": sel,
                 "session_id": "", "req_type": "only_content", "client_req_type": 3}
-        j = api("POST", "/reading/distribution/category/landpage/v", body=body)
+        j = api("POST", "/reading/distribution/category/landpage/v", body=body, signed=SIGN_LIST)
         items = j.get("data", {}).get("video_data", [])
         if not items:
             break
