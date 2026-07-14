@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>红果API · 密钥管理</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,"Microsoft YaHei",sans-serif;background:#141414;color:#eee;padding:20px}
+  h1{font-size:20px;color:#ff6b35;margin:0 0 14px}
+  .bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+  input,button{background:#2a2a2a;color:#eee;border:1px solid #444;border-radius:6px;padding:8px 12px;font-size:14px}
+  button{cursor:pointer}button:hover{background:#ff6b35}
+  button.danger:hover{background:#c0392b}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #333}
+  th{color:#999;font-weight:600}
+  .key{font-family:monospace;cursor:pointer}
+  .on{color:#6c6}.off{color:#888;text-decoration:line-through}
+  .tip{font-size:12px;color:#888;margin:8px 0}
+  #msg{color:#9c9;min-height:18px;margin:8px 0}
+</style>
+</head>
+<body>
+<h1>🔑 红果API 密钥管理</h1>
+<div class="bar">
+  <input id="tok" placeholder="ADMIN_TOKEN" style="width:240px">
+  <button onclick="save()">登录</button>
+  <span style="flex:1"></span>
+  <input id="note" placeholder="备注(如: weixin工具/张三)" style="width:200px">
+  <button onclick="gen()">＋ 生成新密钥</button>
+</div>
+<div id="msg"></div>
+<div class="tip">点密钥可复制完整值。吊销=立即失效(可再启用)；删除=永久移除。客户端「本地链路密钥」填完整密钥。</div>
+<table>
+  <thead><tr><th>密钥</th><th>备注</th><th>状态</th><th>创建时间</th><th>最近使用</th><th>操作</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+
+<script>
+const API=location.origin;
+const tokEl=document.getElementById('tok'), msg=document.getElementById('msg');
+tokEl.value=localStorage.adminTok||'';
+function tok(){return tokEl.value.trim()}
+function save(){localStorage.adminTok=tok();load()}
+function show(t,ok){msg.textContent=t;msg.style.color=ok===false?'#e74c3c':'#9c9'}
+async function api(path,opts){
+  opts=opts||{}; const u=new URL(API+path); u.searchParams.set('admin_token',tok());
+  const r=await fetch(u,opts);
+  if(r.status===401){show('admin_token 无效',false);throw new Error('401')}
+  return r.json();
+}
+async function load(){
+  try{ const d=await api('/admin/keys');
+    const rows=document.getElementById('rows'); rows.innerHTML='';
+    (d.keys||[]).forEach(k=>{
+      const tr=document.createElement('tr');
+      const st=k.enabled?'<span class="on">●启用</span>':'<span class="off">○已吊销</span>';
+      tr.innerHTML=`<td class="key" title="点击复制完整密钥" onclick="cp('${k.key}')">${mask(k.key)}</td>
+        <td>${esc(k.note||'')}</td><td>${st}</td><td>${k.created||''}</td><td>${k.last_used||'-'}</td>
+        <td>${k.enabled?`<button class="danger" onclick="rev('${k.key}',false)">吊销</button>`
+                       :`<button onclick="rev('${k.key}',true)">启用</button>`}
+            <button class="danger" onclick="del('${k.key}')">删除</button></td>`;
+      rows.appendChild(tr);
+    });
+    show(`共 ${d.keys.length} 个密钥, ${d.enabled_count} 个启用`);
+  }catch(e){}
+}
+async function gen(){
+  const note=document.getElementById('note').value.trim();
+  try{ const d=await api('/admin/keys?note='+encodeURIComponent(note),{method:'POST'});
+    await cp(d.key); show('已生成并复制: '+d.key); document.getElementById('note').value=''; load();
+  }catch(e){}
+}
+async function rev(key,enable){ try{ await api('/admin/keys/revoke?key='+key+'&enable='+enable,{method:'POST'}); load(); }catch(e){} }
+async function del(key){ if(!confirm('确认永久删除该密钥?'))return; try{ await api('/admin/keys?key='+key,{method:'DELETE'}); load(); }catch(e){} }
+function mask(k){return k.length>12?k.slice(0,6)+'****'+k.slice(-4):'****'}
+function esc(s){return (s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]))}
+async function cp(t){try{await navigator.clipboard.writeText(t)}catch(e){}}
+if(tok())load();
+</script>
+</body>
+</html>

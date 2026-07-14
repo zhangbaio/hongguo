@@ -1,0 +1,28 @@
+{
+  "_说明": "复制为 config.json 并填入真实值。这些参数从抓包中提取(见 extract_config.py / docs/REVERSE_ENGINEERING.md)。切勿提交真实 config.json。",
+  "api_host": "api5-normal-sinfonlinea.fqnovel.com",
+  "base_query": {
+    "iid": "<install_id>",
+    "device_id": "<device_id>",
+    "aid": "8662",
+    "app_name": "novelread",
+    "version_code": "72232",
+    "version_name": "7.2.2.32",
+    "channel": "<channel>",
+    "device_platform": "android",
+    "device_type": "<device_model>",
+    "os_version": "12",
+    "update_version_code": "72232",
+    "cdid": "<cdid>",
+    "klink_egdi": "<klink_egdi>"
+  },
+  "session_headers": {
+    "cookie": "<cookie: store-region=...; passport_csrf_token=...>",
+    "x-tt-token": "<登录态 token>",
+    "user-agent": "com.phoenix.read/72232 (Linux; U; Android 12; zh_CN; ...; tt-ok/3.12.13.20)",
+    "x-tt-store-region": "cn-sh",
+    "x-tt-store-region-src": "uid",
+    "passport-sdk-version": "5051452",
+    "sdk-version": "2"
+  }
+}
