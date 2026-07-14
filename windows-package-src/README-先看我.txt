@@ -14,11 +14,19 @@
   config.example.json               配置模板(按需复制成 config.json)
   requirements-windows.txt          Python 依赖清单
 
+【已内置脚本】
+  安装依赖.bat    一次性:自动启用 embeddable Python 的 site + 装 pip + 装依赖
+  启动.bat        双击启动:自检 → 起签名服务(等就绪)→ 起 API → 开浏览器到管理页
+
 【还需在 Windows 补齐】(见完整文档 §3)
   jre/            便携 OpenJDK 17 x64(Adoptium Temurin 的 zip 版,解压即用)
-  python/         Windows embeddable Python 3.11 x64(官网 zip,解压即用;记得启用 site)
+  python/         Windows embeddable Python 3.11 x64(官网 zip,解压即用)
   ffmpeg/bin/ffmpeg.exe   可选(不带也能出可播文件)
-  启动.bat        一键启动脚本(文档 §8.2 有示例)
+
+【最省事的三步】
+  1. 把 jre/ 和 python/ 解压到本目录(ffmpeg 可选)
+  2. 双击  安装依赖.bat   (只需一次)
+  3. 双击  启动.bat
 
 【完整步骤 / 协议 / 排错 / 验收清单】
   见源仓库:docs/Windows脱机直连-unidbg-部署需求文档.md
